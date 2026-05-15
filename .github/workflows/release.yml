@@ -97,15 +97,15 @@ jobs:
           files: |
             disktracker-*
 
-  winget:
-    name: Publish to WinGet
-    needs: release
-    runs-on: ubuntu-latest
-    steps:
-      - name: Publish release to WinGet
-        uses: vedantmgoyal9/winget-releaser@v2
-        with:
-          identifier: pratham15541.disktracker
-          release-tag: ${{ github.ref_name }}
-          installers-regex: '.*windows-.*\.zip$'
-          token: ${{ secrets.WINGET_TOKEN }}
+  # winget:
+  #   name: Publish to WinGet
+  #   needs: release
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Publish release to WinGet
+  #       uses: vedantmgoyal9/winget-releaser@v2
+  #       with:
+  #         identifier: pratham15541.disktracker
+  #         release-tag: ${{ github.ref_name }}
+  #         installers-regex: '.*windows-.*\.zip$'
+  #         token: ${{ secrets.WINGET_TOKEN }}
