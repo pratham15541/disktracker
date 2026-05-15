@@ -1,0 +1,28 @@
+[workspace]
+members = [
+    "crates/disktracker-core",
+    "crates/disktracker-events",
+    "crates/disktracker-watch",
+    "crates/disktracker-db",
+    "crates/disktracker-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/pratham15541/disktracker"
+authors = ["Pratham Parikh"]
+
+[workspace.dependencies]
+rustix     = { version = "0.38", features = ["fs", "process", "event"] }
+mimalloc   = { version = "0.1", default-features = false }
+rusqlite   = { version = "0.31", features = ["bundled"] }
+clap       = { version = "4.5", features = ["derive"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono     = { version = "0.4", features = ["serde"] }
+anyhow     = "1"
+indicatif  = "0.17"
+notify     = "6"

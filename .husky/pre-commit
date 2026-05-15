@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+
+set -e
+
+echo "Running cargo fmt..."
+cargo fmt -- --check
+
+echo "Running cargo clippy..."
+cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
+
+echo "Pre-commit checks passed."

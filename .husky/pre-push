@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+
+set -e
+
+echo "Running cargo fmt..."
+cargo fmt -- --check
+
+echo "Running cargo clippy..."
+cargo clippy --workspace --all-targets --all-features --keep-going -- -D warnings
+
+echo "Running cargo test..."
+cargo test --workspace --all-targets --all-features
+
+echo "Pre-push checks passed."

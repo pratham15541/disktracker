@@ -1,0 +1,11 @@
+node_modules
+package-lock.json
+native/*
+!native/.gitkeep
+
+.github
+target
+dist
+coverage
+*.log
+.DS_Store

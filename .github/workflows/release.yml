@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            asset_os: linux
+            asset_arch: x64
+          - os: ubuntu-24.04
+            target: aarch64-unknown-linux-gnu
+            asset_os: linux
+            asset_arch: arm64
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            asset_os: windows
+            asset_arch: x64
+          - os: windows-2025
+            target: aarch64-pc-windows-msvc
+            asset_os: windows
+            asset_arch: arm64
+          - os:  macos-15
+            target: aarch64-apple-darwin
+            asset_os: macos
+            asset_arch: arm64
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            asset_os: macos
+            asset_arch: x64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux ARM64 toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu
+      - name: Build (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release -p disktracker-cli --bin disktracker --target ${{ matrix.target }}
+      - name: Build (Other targets)
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: cargo build --release -p disktracker-cli --bin disktracker --target ${{ matrix.target }}
+      - name: Package (non-Windows)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          tar -czf "dist/disktracker-${{ github.ref_name }}-${{ matrix.asset_os }}-${{ matrix.asset_arch }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" disktracker
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          $archive = "dist/disktracker-${{ github.ref_name }}-${{ matrix.asset_os }}-${{ matrix.asset_arch }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/disktracker.exe" -DestinationPath $archive
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: disktracker-${{ matrix.target }}
+          path: dist/*
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: disktracker-*
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          files: |
+            disktracker-*
+
+  winget:
+    name: Publish to WinGet
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release to WinGet
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: pratham15541.disktracker
+          release-tag: ${{ github.ref_name }}
+          installers-regex: '.*windows-.*\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}
