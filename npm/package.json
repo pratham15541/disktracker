@@ -1,6 +1,6 @@
 {
   "name": "disktracker",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Disk usage tracking CLI",
   "license": "MIT",
   "repository": {
