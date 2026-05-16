@@ -102,9 +102,9 @@ fi
 
 if [[ -f npm/package.json ]]; then
   if $dry_run; then
-    echo "[dry-run] Update npm/package.json and package-lock.json version"
+    echo "[dry-run] Update npm/package.json version"
   else
-    echo "Updating npm package versions"
+    echo "Updating npm package version"
 
     python3 - npm/package.json "$version" <<'PY'
 import json
@@ -119,26 +119,6 @@ data["version"] = version
 
 path.write_text(json.dumps(data, indent=2) + "\n")
 PY
-
-    if [[ -f npm/package-lock.json ]]; then
-      python3 - npm/package-lock.json "$version" <<'PY'
-import json
-import pathlib
-import sys
-
-path = pathlib.Path(sys.argv[1])
-version = sys.argv[2]
-
-data = json.loads(path.read_text())
-
-data["version"] = version
-
-if "packages" in data and "" in data["packages"]:
-    data["packages"][""]["version"] = version
-
-path.write_text(json.dumps(data, indent=2) + "\n")
-PY
-    fi
   fi
 else
   echo "npm/package.json not found; skipping npm version update."
@@ -162,9 +142,7 @@ run git add VERSION Cargo.toml
 if [[ -f npm/package.json ]]; then
   run git add npm/package.json
 fi
-if [[ -f npm/package-lock.json ]]; then
-  run git add npm/package-lock.json
-fi
+
 run git commit -m "release: v$version"
 run git tag "v$version"
 
