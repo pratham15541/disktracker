@@ -112,12 +112,6 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
-      - name: Sync npm version
-        working-directory: npm
-        run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          npm version --no-git-tag-version "$VERSION"
-
       - name: Install dependencies
         working-directory: npm
         run: npm ci
