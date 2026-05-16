@@ -1,0 +1,20 @@
+[package]
+name = "disktracker-watch"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+disktracker-core   = { path = "../disktracker-core" }
+disktracker-events = { path = "../disktracker-events" }
+disktracker-db     = { path = "../disktracker-db" }
+notify     = { workspace = true }
+anyhow     = { workspace = true }
+chrono     = { workspace = true }
+rusqlite   = { workspace = true }
+ctrlc      = "3"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

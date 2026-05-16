@@ -1,0 +1,33 @@
+[package]
+name = "disktracker-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "disktracker"
+path = "src/main.rs"
+
+[dependencies]
+disktracker-core   = { path = "../disktracker-core" }
+disktracker-db     = { path = "../disktracker-db" }
+disktracker-events = { path = "../disktracker-events" }
+disktracker-watch  = { path = "../disktracker-watch" }
+rusqlite   = { workspace = true }
+clap       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+chrono     = { workspace = true }
+anyhow     = { workspace = true }
+indicatif  = { workspace = true }
+mimalloc   = { workspace = true }
+dirs       = "5"
+ctrlc      = "3"
+hostname   = "0.4"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["fileapi", "handleapi", "winnt"] }
