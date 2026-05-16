@@ -33,7 +33,7 @@ jobs:
             target: aarch64-pc-windows-msvc
             asset_os: windows
             asset_arch: arm64
-          - os:  macos-15
+          - os: macos-15
             target: aarch64-apple-darwin
             asset_os: macos
             asset_arch: arm64
@@ -96,6 +96,37 @@ jobs:
           name: ${{ github.ref_name }}
           files: |
             disktracker-*
+
+  publish-npm:
+    name: Publish npm
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Sync npm version
+        working-directory: npm
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          npm version --no-git-tag-version "$VERSION"
+
+      - name: Install dependencies
+        working-directory: npm
+        run: npm ci
+
+      - name: Publish package
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
 
   # winget:
   #   name: Publish to WinGet
