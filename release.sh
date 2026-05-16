@@ -28,7 +28,7 @@ if [[ -n "$(git status --porcelain)" ]]; then
       allowed_only_version=false
       break
     fi
-  done <<< "$(git status --porcelain)"
+  done <<<"$(git status --porcelain)"
 
   if ! $allowed_only_version; then
     echo "Working tree is not clean. Commit or stash changes before releasing."
@@ -51,7 +51,7 @@ if [[ ! -f VERSION ]]; then
   exit 1
 fi
 
-version=$(tr -d ' \t\r\n' < VERSION)
+version=$(tr -d ' \t\r\n' <VERSION)
 if [[ -z "$version" ]]; then
   echo "VERSION file is empty."
   exit 1
