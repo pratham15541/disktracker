@@ -235,7 +235,7 @@ impl MmapState {
         result
     }
 
-    pub fn write_to_file(&self, path: &Path) -> Result<()> {
+    pub fn write_to_file(&mut self, path: &Path) -> Result<()> {
         let active = self.get_active_entries();
         let mut path_pool = Vec::new();
         let mut entries = Vec::with_capacity(active.len());
@@ -271,6 +271,7 @@ impl MmapState {
             file.sync_all()?;
         }
 
+        self.mmap_index = None; // Drop old mapping so rename succeeds on Windows
         std::fs::rename(&tmp_path, path)?;
         Ok(())
     }

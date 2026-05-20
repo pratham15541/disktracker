@@ -381,7 +381,6 @@ fn flush_to_db(
     }
 
     // Now write & reload the mmap index!
-    engine.state.mmap_index = None; // Drop old mapping so rename succeeds on Windows
     if let Err(e) = engine.state.write_to_file(mmap_path) {
         eprintln!("[watch] Failed to write mmap index: {}", e);
     } else {

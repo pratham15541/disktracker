@@ -244,11 +244,25 @@ fn e2e_watch_all_command() {
         "--flush-secs",
         "1",
     ]);
+    command.stderr(std::process::Stdio::piped());
 
     let mut child = command.spawn().unwrap();
 
-    // Sleep a short while to allow the watcher to perform initial scanning
-    std::thread::sleep(std::time::Duration::from_millis(600));
+    // Wait until the watcher is fully initialized
+    let stderr = child.stderr.take().unwrap();
+    let mut reader = std::io::BufReader::new(stderr);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if std::io::BufRead::read_line(&mut reader, &mut line).unwrap() == 0 {
+            break;
+        }
+        if line.contains("Watching") {
+            break;
+        }
+    }
+    // Now sleep a tiny bit to ensure the OS notify event loop is completely registered
+    std::thread::sleep(std::time::Duration::from_millis(200));
 
     // Grow file inside root1
     fs::write(root1.join("a.txt"), b"hello, universe!").unwrap();
