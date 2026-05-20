@@ -1,8 +1,18 @@
-use crate::arena::PathlessArena;
+use crate::arena::{PathlessArena, NO_PARENT};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Result of a warm-scan skip check. If returned by the skip predicate,
+/// the scanner uses cached values instead of enumerating directory contents.
+pub struct SkipResult {
+    pub total_bytes: u64,
+    pub file_count: u32,
+}
+
+pub type WarmSkipPredicate =
+    dyn Fn(&[u8], i64, crate::identity::FsIdentity) -> Option<SkipResult> + Send + Sync;
 
 pub struct ScanConfig {
     pub root: PathBuf,
@@ -14,6 +24,25 @@ pub struct ScanConfig {
     pub one_filesystem: bool,
     /// Optional cancellation flag checked during traversal.
     pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// Parallelism: 0 = auto, 1 = single-threaded, N = N threads.
+    pub parallelism: u16,
+    /// Optional predicate for warm scan: given (path_bytes, mtime, identity),
+    /// return Some(cached) to skip the directory, None to scan it.
+    pub skip_predicate: Option<Arc<WarmSkipPredicate>>,
+}
+
+impl Default for ScanConfig {
+    fn default() -> Self {
+        Self {
+            root: PathBuf::from("/"),
+            max_depth: None,
+            skip_names: Vec::new(),
+            one_filesystem: false,
+            cancel_flag: None,
+            parallelism: 0,
+            skip_predicate: None,
+        }
+    }
 }
 
 impl ScanConfig {
@@ -45,6 +74,10 @@ fn do_scan(arena: &mut PathlessArena, config: &ScanConfig, root_idx: u32) -> (u6
 }
 
 pub fn scan(config: ScanConfig) -> ScanResult {
+    if config.parallelism != 1 {
+        return crate::parallel::scan_parallel(&config);
+    }
+
     let start = Instant::now();
     // Preallocate: 64K nodes, 4 MB byte pool — grows as needed.
     let mut arena = PathlessArena::with_capacity(65536, 4 * 1024 * 1024);
@@ -62,19 +95,12 @@ pub fn scan(config: ScanConfig) -> ScanResult {
     };
 
     let root_sym = arena.intern(&root_bytes);
-    let root_idx = arena.push(crate::arena::DirNode {
-        parent: None,
-        name: root_sym,
-        total_bytes: 0,
-        file_count: 0,
-        mtime: 0,
-        depth: 0,
-    });
+    let root_idx = arena.push_node(NO_PARENT, root_sym, 0);
 
     let (total_bytes, total_files, error_count) = do_scan(&mut arena, &config, root_idx);
 
     // Patch root node with aggregated totals
-    arena.nodes[root_idx as usize].total_bytes = total_bytes;
+    arena.hot[root_idx as usize].total_bytes = total_bytes;
 
     ScanResult {
         total_bytes,

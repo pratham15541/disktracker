@@ -140,51 +140,33 @@ fn load_from_cache(
 mod tests {
     use super::*;
     use crate::store::{bulk_insert_dirs, insert_snapshot, open_db};
-    use disktracker_core::arena::{DirNode, PathlessArena};
+    use disktracker_core::arena::{PathlessArena, NO_PARENT};
 
     fn make_arena_v1() -> PathlessArena {
         let mut arena = PathlessArena::with_capacity(8, 256);
         let r = arena.intern(b"/");
-        let root_idx = arena.push(DirNode {
-            parent: None,
-            name: r,
-            total_bytes: 1000,
-            file_count: 5,
-            mtime: 0,
-            depth: 0,
-        });
+        let root_idx = arena.push_node(NO_PARENT, r, 0);
+        arena.hot[root_idx as usize].total_bytes = 1000;
+        arena.hot[root_idx as usize].file_count = 5;
+
         let s = arena.intern(b"var");
-        arena.push(DirNode {
-            parent: PathlessArena::encode_parent(root_idx),
-            name: s,
-            total_bytes: 200,
-            file_count: 2,
-            mtime: 0,
-            depth: 1,
-        });
+        let var_idx = arena.push_node(root_idx, s, 1);
+        arena.hot[var_idx as usize].total_bytes = 200;
+        arena.hot[var_idx as usize].file_count = 2;
         arena
     }
 
     fn make_arena_v2() -> PathlessArena {
         let mut arena = PathlessArena::with_capacity(8, 256);
         let r = arena.intern(b"/");
-        let root_idx = arena.push(DirNode {
-            parent: None,
-            name: r,
-            total_bytes: 2000,
-            file_count: 8,
-            mtime: 0,
-            depth: 0,
-        });
+        let root_idx = arena.push_node(NO_PARENT, r, 0);
+        arena.hot[root_idx as usize].total_bytes = 2000;
+        arena.hot[root_idx as usize].file_count = 8;
+
         let s = arena.intern(b"var");
-        arena.push(DirNode {
-            parent: PathlessArena::encode_parent(root_idx),
-            name: s,
-            total_bytes: 1200,
-            file_count: 6,
-            mtime: 0,
-            depth: 1,
-        });
+        let var_idx = arena.push_node(root_idx, s, 1);
+        arena.hot[var_idx as usize].total_bytes = 1200;
+        arena.hot[var_idx as usize].file_count = 6;
         arena
     }
 

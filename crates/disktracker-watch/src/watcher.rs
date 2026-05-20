@@ -1,11 +1,12 @@
-use crate::incremental::{path_to_bytes, IncrementalEngine};
+use crate::incremental::IncrementalEngine;
 use anyhow::Result;
 use chrono::Utc;
 use disktracker_db::{
     delta::bulk_insert_deltas,
     events::insert_fs_events_batch,
+    mutation::insert_mutations_batch,
     store::{insert_snapshot, rollback_snapshot},
-    watch_state::{touch_event_time, touch_reconcile_time, upsert_watch_state, WatchState},
+    watch_state::{touch_event_time, touch_reconcile_time, upsert_watch_state},
 };
 use disktracker_events::{FsEvent, FsEventKind};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -18,7 +19,7 @@ use std::time::{Duration, Instant};
 
 /// Configuration for a watch session.
 pub struct WatchConfig {
-    pub root: PathBuf,
+    pub roots: Vec<PathBuf>,
     pub db_path: PathBuf,
     pub debounce_ms: u64,
     pub quiet: bool,
@@ -31,7 +32,7 @@ pub struct WatchConfig {
 impl Default for WatchConfig {
     fn default() -> Self {
         Self {
-            root: PathBuf::from("/"),
+            roots: vec![PathBuf::from("/")],
             db_path: PathBuf::new(),
             debounce_ms: 500,
             quiet: false,
@@ -46,44 +47,120 @@ impl Default for WatchConfig {
 pub fn run_watch(config: WatchConfig) -> Result<()> {
     let conn = disktracker_db::open_db(&config.db_path)?;
 
-    if !config.quiet {
-        eprintln!("[watch] Initial scan of {} …", config.root.display());
-    }
+    let mmap_path = config.db_path.with_extension("mmap");
 
-    let (mut engine, initial_result) = IncrementalEngine::init(
-        config.root.clone(),
-        config.skip_names.clone(),
-        config.one_filesystem,
-    );
+    let mut hydrated_snap_id = None;
+    let (mut engine, initial_scan_results) = if mmap_path.exists() {
+        if !config.quiet {
+            eprintln!(
+                "[watch] Hydrating instantly from memory-mapped index: {} …",
+                mmap_path.display()
+            );
+        }
+        match crate::mmap_index::MmapState::load_from_file(&mmap_path) {
+            Ok(state) => {
+                let engine = IncrementalEngine::init_from_state(
+                    config.roots.clone(),
+                    config.skip_names.clone(),
+                    config.one_filesystem,
+                    state,
+                );
+                // Attempt to load the last snapshot ID from DB
+                if let Ok(Some(ws)) = disktracker_db::watch_state::get_watch_state(&conn) {
+                    hydrated_snap_id = ws.last_snapshot_id;
+                }
+                (engine, None)
+            }
+            Err(e) => {
+                eprintln!(
+                    "[watch] Failed to load mmap index: {} — falling back to physical scan",
+                    e
+                );
+                let (engine, initial_results) = IncrementalEngine::init_multi(
+                    config.roots.clone(),
+                    config.skip_names.clone(),
+                    config.one_filesystem,
+                );
+                (engine, Some(initial_results))
+            }
+        }
+    } else {
+        let (engine, initial_results) = IncrementalEngine::init_multi(
+            config.roots.clone(),
+            config.skip_names.clone(),
+            config.one_filesystem,
+        );
+        (engine, Some(initial_results))
+    };
 
     let started_at = Utc::now().timestamp();
-    let root_str = config.root.to_string_lossy().into_owned();
 
-    // Store initial snapshot
-    let snap_id = insert_snapshot(
-        &conn,
-        &root_str,
-        started_at,
-        Utc::now().timestamp(),
-        initial_result.total_files,
-        initial_result.total_bytes,
-        initial_result.error_count,
-    )?;
+    let snap_id = if let Some(sid) = hydrated_snap_id {
+        if !config.quiet {
+            eprintln!("[watch] Reusing snapshot #{} from watch_state.", sid);
+        }
+        sid
+    } else {
+        let results = match initial_scan_results {
+            Some(res) => res,
+            None => {
+                if !config.quiet {
+                    eprintln!("[watch] No snapshot ID found in DB, conducting fallback scans…");
+                }
+                let mut scan_results = Vec::new();
+                for root in &config.roots {
+                    let config_scan = disktracker_core::scan::ScanConfig {
+                        root: root.clone(),
+                        max_depth: None,
+                        skip_names: config.skip_names.clone(),
+                        one_filesystem: config.one_filesystem,
+                        cancel_flag: None,
+                        ..Default::default()
+                    };
+                    scan_results.push(disktracker_core::scan::scan(config_scan));
+                }
+                scan_results
+            }
+        };
 
-    if let Err(e) = disktracker_db::store::bulk_insert_dirs(&conn, snap_id, &initial_result.arena) {
-        eprintln!(
-            "[watch] Failed to store initial snapshot: {} — rolling back",
-            e
-        );
-        rollback_snapshot(&conn, snap_id)?;
-        return Err(e);
-    }
+        let mut last_sid = 0;
+        for (root, result) in config.roots.iter().zip(results) {
+            let root_str = root.to_string_lossy().into_owned();
+            let sid = insert_snapshot(
+                &conn,
+                &root_str,
+                started_at,
+                Utc::now().timestamp(),
+                result.total_files,
+                result.total_bytes,
+                result.error_count,
+            )?;
+            last_sid = sid;
+
+            if let Err(e) = disktracker_db::store::bulk_insert_dirs(&conn, sid, &result.arena) {
+                eprintln!(
+                    "[watch] Failed to store initial snapshot for {}: {} — rolling back",
+                    root.display(),
+                    e
+                );
+                rollback_snapshot(&conn, sid)?;
+                return Err(e);
+            }
+        }
+
+        // Try to write it so next boot is instant
+        if let Err(e2) = engine.state.write_to_file(&mmap_path) {
+            eprintln!("[watch] Failed to write initial mmap index: {}", e2);
+        }
+
+        last_sid
+    };
 
     // Persist watch state
     upsert_watch_state(
         &conn,
-        &WatchState {
-            watch_root: path_to_bytes(&config.root),
+        &disktracker_db::watch_state::WatchState {
+            watch_root: crate::incremental::roots_to_bytes(&config.roots),
             last_event_time: None,
             last_reconcile_time: Some(Utc::now().timestamp()),
             last_snapshot_id: Some(snap_id),
@@ -91,11 +168,16 @@ pub fn run_watch(config: WatchConfig) -> Result<()> {
     )?;
 
     if !config.quiet {
+        let root_names: Vec<String> = config
+            .roots
+            .iter()
+            .map(|r| r.to_string_lossy().into_owned())
+            .collect();
         eprintln!(
-            "[watch] Initial snapshot #{} stored ({} dirs, {}). Watching…",
+            "[watch] Watching {} (snapshot #{}, {} entries). Watching…",
+            root_names.join(", "),
             snap_id,
-            initial_result.arena.nodes.len(),
-            fmt_bytes(initial_result.total_bytes),
+            engine.state.len(),
         );
     }
 
@@ -115,7 +197,9 @@ pub fn run_watch(config: WatchConfig) -> Result<()> {
         notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
             let _ = tx.send(res);
         })?;
-    watcher.watch(&config.root, RecursiveMode::Recursive)?;
+    for root in &config.roots {
+        watcher.watch(root, RecursiveMode::Recursive)?;
+    }
 
     let debounce = Duration::from_millis(config.debounce_ms);
     let flush_interval = Duration::from_secs(config.flush_interval_secs.max(1));
@@ -139,11 +223,12 @@ pub fn run_watch(config: WatchConfig) -> Result<()> {
                 if last_flush.elapsed() >= flush_interval {
                     flush_to_db(
                         &conn,
-                        &engine,
+                        &mut engine,
                         &mut current_snap_id,
                         &mut pending_events,
-                        &root_str,
+                        &config.roots,
                         config.quiet,
+                        &mmap_path,
                     )?;
                     last_flush = Instant::now();
                     touch_reconcile_time(&conn, Utc::now().timestamp())?;
@@ -195,6 +280,9 @@ pub fn run_watch(config: WatchConfig) -> Result<()> {
                 // Store raw events
                 if !pending_events.is_empty() {
                     insert_fs_events_batch(&conn, &pending_events).ok();
+                    if let Err(e) = insert_mutations_batch(&conn, &pending_events) {
+                        eprintln!("[watch] Failed to log mutations: {}", e);
+                    }
                     pending_events.clear();
                 }
                 // Store deltas
@@ -208,11 +296,12 @@ pub fn run_watch(config: WatchConfig) -> Result<()> {
         if last_flush.elapsed() >= flush_interval {
             flush_to_db(
                 &conn,
-                &engine,
+                &mut engine,
                 &mut current_snap_id,
                 &mut pending_events,
-                &root_str,
+                &config.roots,
                 config.quiet,
+                &mmap_path,
             )?;
             last_flush = Instant::now();
         }
@@ -224,11 +313,12 @@ pub fn run_watch(config: WatchConfig) -> Result<()> {
     }
     flush_to_db(
         &conn,
-        &engine,
+        &mut engine,
         &mut current_snap_id,
         &mut pending_events,
-        &root_str,
+        &config.roots,
         config.quiet,
+        &mmap_path,
     )?;
     touch_reconcile_time(&conn, Utc::now().timestamp())?;
     Ok(())
@@ -237,56 +327,76 @@ pub fn run_watch(config: WatchConfig) -> Result<()> {
 /// Flush current in-memory state to a new snapshot.
 fn flush_to_db(
     conn: &Connection,
-    engine: &IncrementalEngine,
+    engine: &mut IncrementalEngine,
     snap_id: &mut i64,
     pending_events: &mut Vec<FsEvent>,
-    root_str: &str,
+    roots: &[PathBuf],
     quiet: bool,
+    mmap_path: &std::path::Path,
 ) -> Result<()> {
     // Store any pending raw events
     if !pending_events.is_empty() {
         insert_fs_events_batch(conn, pending_events).ok();
+        if let Err(e) = insert_mutations_batch(conn, pending_events) {
+            eprintln!("[watch] Failed to log mutations: {}", e);
+        }
         pending_events.clear();
     }
 
     let now = Utc::now().timestamp();
-    let root_bytes = root_str.as_bytes().to_vec();
-    let total_bytes = engine.current_size(&root_bytes).max(0) as u64;
+    let mut last_new_snap_id = *snap_id;
 
-    let new_snap_id = insert_snapshot(conn, root_str, now, now, 0, total_bytes, 0)?;
+    for root in roots {
+        let root_str = root.to_string_lossy().into_owned();
+        let root_bytes = crate::incremental::path_to_bytes(root);
+        let total_bytes = engine.current_size(&root_bytes).max(0) as u64;
 
-    // Write current state as a full dir_snapshot
-    // (for large states this could be delta-only, but correctness first)
-    {
-        let tx = conn.unchecked_transaction()?;
+        let new_snap_id = insert_snapshot(conn, &root_str, now, now, 0, total_bytes, 0)?;
+        last_new_snap_id = new_snap_id;
+
+        // Write current state as a full dir_snapshot
         {
-            let mut stmt = tx.prepare_cached(
-                "INSERT INTO dir_snapshots
-                 (snapshot_id, path_blob, path_utf8, depth, total_bytes, file_count, mtime)
-                 VALUES (?1, ?2, ?3, 0, ?4, 0, ?5)",
-            )?;
-            for (path, &bytes) in &engine.state {
-                let utf8 = std::str::from_utf8(path).ok().map(str::to_owned);
-                stmt.execute(rusqlite::params![
-                    new_snap_id,
-                    path,
-                    utf8,
-                    bytes.max(0),
-                    now,
-                ])?;
+            let tx = conn.unchecked_transaction()?;
+            {
+                let mut stmt = tx.prepare_cached(
+                    "INSERT INTO dir_snapshots
+                     (snapshot_id, path_blob, path_utf8, depth, total_bytes, file_count, mtime)
+                     VALUES (?1, ?2, ?3, 0, ?4, 0, ?5)",
+                )?;
+                for (path, bytes) in engine.state.get_active_entries() {
+                    if path.starts_with(&root_bytes) {
+                        let utf8 = std::str::from_utf8(&path).ok().map(str::to_owned);
+                        stmt.execute(rusqlite::params![
+                            new_snap_id,
+                            path,
+                            utf8,
+                            bytes.max(0),
+                            now,
+                        ])?;
+                    }
+                }
             }
+            tx.commit()?;
         }
-        tx.commit()?;
     }
 
-    *snap_id = new_snap_id;
+    // Now write & reload the mmap index!
+    engine.state.mmap_index = None; // Drop old mapping so rename succeeds on Windows
+    if let Err(e) = engine.state.write_to_file(mmap_path) {
+        eprintln!("[watch] Failed to write mmap index: {}", e);
+    } else {
+        if let Err(e) = engine.state.reload_from_file(mmap_path) {
+            eprintln!("[watch] Failed to reload mmap index: {}", e);
+        }
+    }
+
+    *snap_id = last_new_snap_id;
 
     if !quiet {
         eprintln!(
-            "[watch] Flushed snapshot #{} ({} dirs, {})",
-            new_snap_id,
+            "[watch] Flushed snapshot #{} ({} dirs)",
+            last_new_snap_id,
             engine.state.len(),
-            fmt_bytes(total_bytes),
         );
     }
     Ok(())

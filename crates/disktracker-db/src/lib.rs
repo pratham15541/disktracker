@@ -1,6 +1,7 @@
 pub mod delta;
 pub mod events;
 pub mod explain;
+pub mod mutation;
 pub mod prune;
 pub mod schema;
 pub mod store;

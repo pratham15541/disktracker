@@ -19,7 +19,9 @@ CREATE TABLE IF NOT EXISTS dir_snapshots (
     depth           INTEGER NOT NULL,
     total_bytes     INTEGER NOT NULL,
     file_count      INTEGER NOT NULL,
-    mtime           INTEGER NOT NULL
+    mtime           INTEGER NOT NULL,
+    dev             INTEGER NOT NULL DEFAULT 0,
+    ino             INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_dir_snapshot_id
@@ -27,6 +29,9 @@ CREATE INDEX IF NOT EXISTS idx_dir_snapshot_id
 
 CREATE INDEX IF NOT EXISTS idx_dir_path_bytes
     ON dir_snapshots(path_blob, snapshot_id);
+
+CREATE INDEX IF NOT EXISTS idx_dir_identity
+    ON dir_snapshots(dev, ino, snapshot_id);
 
 CREATE TABLE IF NOT EXISTS diff_cache (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -79,6 +84,24 @@ CREATE TABLE IF NOT EXISTS watch_state (
     last_reconcile_time INTEGER,
     last_snapshot_id    INTEGER
 );
+
+CREATE TABLE IF NOT EXISTS mutation_log (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp       INTEGER NOT NULL,
+    mutation_type   INTEGER NOT NULL,
+    dev             INTEGER NOT NULL,
+    ino             INTEGER NOT NULL,
+    path_blob       BLOB    NOT NULL,
+    old_size        INTEGER,
+    new_size        INTEGER,
+    old_path_blob   BLOB
+);
+
+CREATE INDEX IF NOT EXISTS idx_mutation_log_time
+    ON mutation_log(timestamp);
+
+CREATE INDEX IF NOT EXISTS idx_mutation_log_identity
+    ON mutation_log(dev, ino);
 "#;
 
 pub const WAL_PRAGMAS: &str = "

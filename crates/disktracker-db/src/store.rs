@@ -1,6 +1,8 @@
 use crate::schema::{SCHEMA, WAL_PRAGMAS};
 use anyhow::{Context, Result};
 use disktracker_core::arena::PathlessArena;
+use disktracker_core::identity::FsIdentity;
+use disktracker_core::warm::{CachedDir, SnapshotIndex};
 use rusqlite::{params, Connection};
 use std::path::Path;
 
@@ -12,6 +14,16 @@ pub fn open_db(db_path: &Path) -> Result<Connection> {
     let conn =
         Connection::open(db_path).with_context(|| format!("Cannot open database {:?}", db_path))?;
     conn.execute_batch(WAL_PRAGMAS)?;
+    // Dynamically migrate existing databases by adding columns if they don't exist.
+    // SQLite's ALTER TABLE ADD COLUMN is fast and idempotent if we catch and ignore errors.
+    let _ = conn.execute(
+        "ALTER TABLE dir_snapshots ADD COLUMN dev INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE dir_snapshots ADD COLUMN ino INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     conn.execute_batch(SCHEMA)?;
     Ok(conn)
 }
@@ -54,20 +66,24 @@ pub fn bulk_insert_dirs(conn: &Connection, snapshot_id: i64, arena: &PathlessAre
     {
         let mut stmt = tx.prepare_cached(
             "INSERT INTO dir_snapshots
-             (snapshot_id, path_blob, path_utf8, depth, total_bytes, file_count, mtime)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (snapshot_id, path_blob, path_utf8, depth, total_bytes, file_count, mtime, dev, ino)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )?;
-        for (idx, node) in arena.nodes.iter().enumerate() {
+        for idx in 0..arena.node_count() {
+            let hot = &arena.hot[idx];
+            let cold = &arena.cold[idx];
             let raw_path = arena.materialize_path(idx as u32);
             let utf8_path = std::str::from_utf8(&raw_path).ok().map(str::to_owned);
             stmt.execute(params![
                 snapshot_id,
                 raw_path,
                 utf8_path,
-                node.depth as i64,
-                node.total_bytes as i64,
-                node.file_count as i64,
-                node.mtime,
+                hot.depth as i64,
+                hot.total_bytes as i64,
+                hot.file_count as i64,
+                cold.mtime,
+                cold.identity.dev as i64,
+                cold.identity.ino as i64,
             ])?;
         }
     }
@@ -126,6 +142,16 @@ pub fn get_latest_snapshot_id(conn: &Connection) -> Result<Option<i64>> {
     Ok(id)
 }
 
+pub fn get_latest_snapshot_for_root(conn: &Connection, root: &str) -> Result<Option<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM snapshots
+         WHERE scan_root = ?1
+         ORDER BY id DESC LIMIT 1",
+    )?;
+    let id: Option<i64> = stmt.query_row(params![root], |row| row.get(0)).ok();
+    Ok(id)
+}
+
 pub fn resolve_snapshot_ref(conn: &Connection, s: &str) -> Result<i64> {
     if let Ok(id) = s.parse::<i64>() {
         return Ok(id);
@@ -178,4 +204,43 @@ pub fn rollback_snapshot(conn: &Connection, snapshot_id: i64) -> Result<()> {
     )?;
     conn.execute("DELETE FROM snapshots WHERE id = ?1", params![snapshot_id])?;
     Ok(())
+}
+
+pub fn load_snapshot_index(conn: &Connection, snapshot_id: i64) -> Result<SnapshotIndex> {
+    let mut stmt = conn.prepare(
+        "SELECT path_blob, total_bytes, file_count, mtime, dev, ino
+         FROM dir_snapshots
+         WHERE snapshot_id = ?1",
+    )?;
+    let mut index = SnapshotIndex::new();
+    let rows = stmt.query_map(params![snapshot_id], |row| {
+        let path_blob: Vec<u8> = row.get(0)?;
+        let total_bytes: i64 = row.get(1)?;
+        let file_count: i64 = row.get(2)?;
+        let mtime: i64 = row.get(3)?;
+        let dev: i64 = row.get(4)?;
+        let ino: i64 = row.get(5)?;
+        Ok((
+            path_blob,
+            CachedDir {
+                total_bytes: total_bytes as u64,
+                file_count: file_count as u32,
+                mtime,
+            },
+            FsIdentity {
+                dev: dev as u64,
+                ino: ino as u64,
+            },
+        ))
+    })?;
+
+    for row_res in rows {
+        let (path_blob, cached, identity) = row_res?;
+        if identity.is_known() {
+            index.insert_identity(identity, cached.clone());
+        }
+        index.insert_path(path_blob, cached);
+    }
+
+    Ok(index)
 }

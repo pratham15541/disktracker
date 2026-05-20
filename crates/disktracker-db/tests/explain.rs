@@ -1,5 +1,5 @@
 use chrono::Utc;
-use disktracker_core::arena::{DirNode, PathlessArena};
+use disktracker_core::arena::{PathlessArena, NO_PARENT};
 use disktracker_db::explain::query_explain;
 use disktracker_db::open_db;
 use disktracker_db::store::{bulk_insert_dirs, insert_snapshot};
@@ -8,23 +8,12 @@ use tempfile::tempdir;
 fn make_arena(root_bytes: u64, node_modules_bytes: u64) -> PathlessArena {
     let mut arena = PathlessArena::with_capacity(8, 128);
     let root_sym = arena.intern(b"/");
-    let root_idx = arena.push(DirNode {
-        parent: None,
-        name: root_sym,
-        total_bytes: root_bytes,
-        file_count: 0,
-        mtime: 0,
-        depth: 0,
-    });
+    let root_idx = arena.push_node(NO_PARENT, root_sym, 0);
+    arena.hot[root_idx as usize].total_bytes = root_bytes;
+
     let nm_sym = arena.intern(b"node_modules");
-    arena.push(DirNode {
-        parent: PathlessArena::encode_parent(root_idx),
-        name: nm_sym,
-        total_bytes: node_modules_bytes,
-        file_count: 0,
-        mtime: 0,
-        depth: 1,
-    });
+    let nm_idx = arena.push_node(root_idx, nm_sym, 1);
+    arena.hot[nm_idx as usize].total_bytes = node_modules_bytes;
     arena
 }
 

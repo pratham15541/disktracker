@@ -4,19 +4,16 @@ use disktracker_db::delta::DeltaRow;
 use disktracker_events::DirtyQueue;
 use notify::{Event, EventKind};
 use rusqlite::Connection;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// In-memory directory size map.
-/// Key: raw path bytes. Value: total recursive bytes.
-pub type SizeMap = HashMap<Vec<u8>, i64>;
+use crate::mmap_index::MmapState;
 
 /// Incremental aggregation engine.
 /// Maintains in-memory state of directory sizes and processes dirty queues.
 pub struct IncrementalEngine {
-    pub state: SizeMap,
+    pub state: MmapState,
     pub dirty: DirtyQueue,
-    scan_root: PathBuf,
+    pub scan_roots: Vec<PathBuf>,
     skip_names: Vec<Vec<u8>>,
     one_filesystem: bool,
 }
@@ -28,28 +25,59 @@ impl IncrementalEngine {
         skip_names: Vec<Vec<u8>>,
         one_filesystem: bool,
     ) -> (Self, disktracker_core::scan::ScanResult) {
-        let config = ScanConfig {
-            root: root.clone(),
-            max_depth: None,
-            skip_names: skip_names.clone(),
-            one_filesystem,
-            cancel_flag: None,
-        };
-        let result = scan(config);
-        let mut state: SizeMap = HashMap::with_capacity(result.arena.nodes.len());
-        for idx in 0..result.arena.nodes.len() {
-            let path = result.arena.materialize_path(idx as u32);
-            let bytes = result.arena.nodes[idx].total_bytes as i64;
-            state.insert(path, bytes);
+        let (engine, results) = Self::init_multi(vec![root], skip_names, one_filesystem);
+        (engine, results.into_iter().next().unwrap())
+    }
+
+    /// Perform initial scans for multiple roots.
+    pub fn init_multi(
+        roots: Vec<PathBuf>,
+        skip_names: Vec<Vec<u8>>,
+        one_filesystem: bool,
+    ) -> (Self, Vec<disktracker_core::scan::ScanResult>) {
+        let mut state = MmapState::new(None);
+        let mut results = Vec::new();
+        for root in &roots {
+            let config = ScanConfig {
+                root: root.clone(),
+                max_depth: None,
+                skip_names: skip_names.clone(),
+                one_filesystem,
+                cancel_flag: None,
+                ..Default::default()
+            };
+            let result = scan(config);
+            for idx in 0..result.arena.node_count() {
+                let path = result.arena.materialize_path(idx as u32);
+                let bytes = result.arena.hot[idx].total_bytes as i64;
+                state.insert(path, bytes);
+            }
+            results.push(result);
         }
         let engine = Self {
             state,
             dirty: DirtyQueue::new(),
-            scan_root: root,
+            scan_roots: roots,
             skip_names,
             one_filesystem,
         };
-        (engine, result)
+        (engine, results)
+    }
+
+    /// Initialize the engine directly from a loaded memory-mapped state.
+    pub fn init_from_state(
+        roots: Vec<PathBuf>,
+        skip_names: Vec<Vec<u8>>,
+        one_filesystem: bool,
+        state: MmapState,
+    ) -> Self {
+        Self {
+            state,
+            dirty: DirtyQueue::new(),
+            scan_roots: roots,
+            skip_names,
+            one_filesystem,
+        }
     }
 
     /// Process a notify event: mark the affected directory dirty.
@@ -67,8 +95,8 @@ impl IncrementalEngine {
                     .unwrap_or_else(|| path.clone())
             };
 
-            // Only mark dirty if within our scan root
-            if dir.starts_with(&self.scan_root) {
+            // Only mark dirty if within one of our scan roots
+            if self.scan_roots.iter().any(|r| dir.starts_with(r)) {
                 let dir_bytes = path_to_bytes(&dir);
                 if !dir_bytes.is_empty() {
                     self.dirty.mark_dirty(dir_bytes);
@@ -88,8 +116,13 @@ impl IncrementalEngine {
         let (dirty_paths, overflow) = self.dirty.drain();
 
         if overflow {
-            eprintln!("[watch] Event overflow — triggering full reconcile of root");
-            return self.process_one_dirty(&self.scan_root.clone());
+            eprintln!("[watch] Event overflow — triggering full reconcile of all roots");
+            let mut all_deltas = Vec::new();
+            for root in self.scan_roots.clone() {
+                let deltas = self.process_one_dirty(&root)?;
+                all_deltas.extend(deltas);
+            }
+            return Ok(all_deltas);
         }
 
         let mut all_deltas: Vec<DeltaRow> = Vec::new();
@@ -103,43 +136,94 @@ impl IncrementalEngine {
 
     fn process_one_dirty(&mut self, path: &Path) -> Result<Vec<DeltaRow>> {
         let path_bytes = path_to_bytes(path);
-        let old_size = self.state.get(&path_bytes).copied().unwrap_or(0);
+        let old_size = self.state.get(&path_bytes).unwrap_or(0);
 
         if !path.exists() {
             // Directory was deleted — size goes to zero
             if old_size == 0 {
                 return Ok(vec![]);
             }
-            self.state.remove(&path_bytes);
+            // Recursively remove path_bytes and all of its subdirectories from self.state
+            self.state.remove_subtree(&path_bytes);
             let delta = -old_size;
             self.propagate_delta(&path_bytes, delta);
             return Ok(vec![DeltaRow::new(path_bytes, Some(old_size), 0)]);
         }
 
-        // Rescan this subtree only
-        let config = ScanConfig {
-            root: path.to_path_buf(),
-            max_depth: None,
-            skip_names: self.skip_names.clone(),
-            one_filesystem: self.one_filesystem,
-            cancel_flag: None,
-        };
-        let result = scan(config);
-        let new_size = result.total_bytes as i64;
-        let delta = new_size - old_size;
+        let mut new_size = 0;
+        let mut subdirs_to_rescan = Vec::new();
+        let mut expected_subdirs = std::collections::HashSet::new();
 
+        // 1. Identify direct subdirectories currently registered in self.state under `path`
+        for (k, _) in self.state.get_active_entries() {
+            if parent_path_bytes(&k) == path_bytes {
+                expected_subdirs.insert(k);
+            }
+        }
+
+        // 2. Scan direct entries non-recursively
+        if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                if let Ok(meta) = entry.metadata() {
+                    let entry_path = entry.path();
+                    let entry_bytes = path_to_bytes(&entry_path);
+                    if meta.is_dir() {
+                        let name = entry
+                            .file_name()
+                            .to_string_lossy()
+                            .into_owned()
+                            .into_bytes();
+                        if self.skip_names.contains(&name) {
+                            continue;
+                        }
+                        if let Some(sub_bytes) = self.state.get(&entry_bytes) {
+                            new_size += sub_bytes;
+                            expected_subdirs.remove(&entry_bytes);
+                        } else {
+                            subdirs_to_rescan.push(entry_path);
+                        }
+                    } else {
+                        new_size += meta.len() as i64;
+                    }
+                }
+            }
+        }
+
+        // 3. Clean up subdirectories that are no longer physically present
+        for deleted_sub in expected_subdirs {
+            self.state.remove_subtree(&deleted_sub);
+        }
+
+        // 4. Recursively scan brand new directories
+        for subdir in subdirs_to_rescan {
+            let config = ScanConfig {
+                root: subdir.clone(),
+                max_depth: None,
+                skip_names: self.skip_names.clone(),
+                one_filesystem: self.one_filesystem,
+                cancel_flag: None,
+                ..Default::default()
+            };
+            let result = scan(config);
+            // Insert all scanned subdirectories into state
+            for idx in 0..result.arena.node_count() {
+                let sub_path = result.arena.materialize_path(idx as u32);
+                let sub_bytes = result.arena.hot[idx].total_bytes as i64;
+                self.state.insert(sub_path, sub_bytes);
+            }
+            let sub_bytes = result.total_bytes as i64;
+            new_size += sub_bytes;
+        }
+
+        let delta = new_size - old_size;
         if delta == 0 {
             return Ok(vec![]);
         }
 
-        // Update in-memory state for all dirs in the rescanned subtree
-        for idx in 0..result.arena.nodes.len() {
-            let sub_path = result.arena.materialize_path(idx as u32);
-            let sub_bytes = result.arena.nodes[idx].total_bytes as i64;
-            self.state.insert(sub_path, sub_bytes);
-        }
+        // Update path_bytes size in state
+        self.state.insert(path_bytes.clone(), new_size);
 
-        // Propagate net delta up the parent chain (outside the rescanned subtree)
+        // Propagate net delta up the parent chain
         self.propagate_delta(&path_bytes, delta);
 
         Ok(vec![DeltaRow::new(
@@ -150,7 +234,7 @@ impl IncrementalEngine {
     }
 
     /// Propagate a size delta up the parent chain of `path_bytes`.
-    /// Stops at the scan root or filesystem root.
+    /// Stops at any scan root or filesystem root.
     fn propagate_delta(&mut self, path_bytes: &[u8], delta: i64) {
         let mut current = path_bytes.to_vec();
         loop {
@@ -158,11 +242,10 @@ impl IncrementalEngine {
             if parent.is_empty() || parent == current {
                 break;
             }
-            let size = self.state.entry(parent.clone()).or_insert(0);
-            *size += delta;
-            // Stop propagating once we've updated the scan root
-            let root_bytes = path_to_bytes(&self.scan_root);
-            if parent == root_bytes {
+            let old_size = self.state.get(&parent).unwrap_or(0);
+            self.state.insert(parent.clone(), old_size + delta);
+            // Stop propagating once we've updated any scan root
+            if self.scan_roots.iter().any(|r| parent == path_to_bytes(r)) {
                 break;
             }
             current = parent;
@@ -171,13 +254,12 @@ impl IncrementalEngine {
 
     /// Current size of a path according to in-memory state.
     pub fn current_size(&self, path: &[u8]) -> i64 {
-        self.state.get(path).copied().unwrap_or(0)
+        self.state.get(path).unwrap_or(0)
     }
 
     /// Top N largest directories by current size.
     pub fn top_dirs(&self, n: usize) -> Vec<(Vec<u8>, i64)> {
-        let mut entries: Vec<(Vec<u8>, i64)> =
-            self.state.iter().map(|(k, &v)| (k.clone(), v)).collect();
+        let mut entries = self.state.get_active_entries();
         entries.sort_by_key(|b| std::cmp::Reverse(b.1));
         entries.truncate(n);
         entries
@@ -225,4 +307,24 @@ pub fn parent_path_bytes(path: &[u8]) -> Vec<u8> {
     } else {
         vec![] // no parent
     }
+}
+
+// Serialize a list of PathBuf into a byte vector separated by \0
+pub fn roots_to_bytes(roots: &[PathBuf]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for (i, r) in roots.iter().enumerate() {
+        if i > 0 {
+            bytes.push(0);
+        }
+        bytes.extend_from_slice(&path_to_bytes(r));
+    }
+    bytes
+}
+
+// Deserialize a byte vector separated by \0 back into Vec<PathBuf>
+pub fn bytes_to_roots(bytes: &[u8]) -> Vec<PathBuf> {
+    if bytes.is_empty() {
+        return vec![];
+    }
+    bytes.split(|&b| b == 0).map(bytes_to_path).collect()
 }
