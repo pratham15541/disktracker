@@ -1,0 +1,17 @@
+[package]
+name = "disktracker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+platform-traits = { path = "../../crates/platform/traits" }
+platform-windows = { path = "../../crates/platform/windows" }
+core-types = { path = "../../crates/core" }
+api = { path = "../../crates/api" }
+storage = { path = "../../crates/storage" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+

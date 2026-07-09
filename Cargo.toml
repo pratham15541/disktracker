@@ -1,0 +1,15 @@
+[workspace]
+resolver = "2"
+members = [
+    "apps/cli",
+    "crates/core",
+    "crates/config",
+    "crates/api",
+    "crates/platform/traits",
+    "crates/platform/windows",
+    "crates/scanner",
+    "crates/pipeline",
+    "crates/storage",
+    "crates/telemetry",
+    "crates/common",
+]

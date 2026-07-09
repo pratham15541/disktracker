@@ -1,0 +1,13 @@
+[package]
+name = "scanner"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-types = { path = "../core" }
+storage = { path = "../storage" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+chrono = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+platform-windows = { path = "../platform/windows" }
