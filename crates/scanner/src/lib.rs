@@ -1,11 +1,11 @@
 #[cfg(not(windows))]
+use chrono::Utc;
+use rusqlite::Connection;
+#[cfg(not(windows))]
 use std::fs;
 use std::io;
 #[cfg(not(windows))]
 use std::path::Path;
-#[cfg(not(windows))]
-use chrono::Utc;
-use rusqlite::Connection;
 
 #[cfg(not(windows))]
 fn get_file_id(_path: &Path, metadata: &fs::Metadata) -> u64 {
@@ -20,7 +20,10 @@ fn get_file_id(_path: &Path, metadata: &fs::Metadata) -> u64 {
     }
 }
 
-fn flush_batch(conn: &mut Connection, batch: &mut Vec<core_types::Fact>) -> Result<(), rusqlite::Error> {
+fn flush_batch(
+    conn: &mut Connection,
+    batch: &mut Vec<core_types::Fact>,
+) -> Result<(), rusqlite::Error> {
     if batch.is_empty() {
         return Ok(());
     }
@@ -95,8 +98,12 @@ pub fn scan_volume(volume: &str) -> io::Result<()> {
     let vol_owned = volume.to_string();
 
     let tracker = core_types::get_volume_tracker(volume);
-    tracker.dirs_scanned.store(0, std::sync::atomic::Ordering::Relaxed);
-    tracker.files_scanned.store(0, std::sync::atomic::Ordering::Relaxed);
+    tracker
+        .dirs_scanned
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    tracker
+        .files_scanned
+        .store(0, std::sync::atomic::Ordering::Relaxed);
     *tracker.current_path.lock().unwrap() = None;
 
     #[cfg(windows)]
@@ -116,10 +123,14 @@ pub fn scan_volume(volume: &str) -> io::Result<()> {
 
             if info.is_directory {
                 dirs_scanned += 1;
-                tracker.dirs_scanned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracker
+                    .dirs_scanned
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             } else {
                 files_scanned += 1;
-                tracker.files_scanned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracker
+                    .files_scanned
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
 
             if batch.len() >= 5000 {
@@ -134,8 +145,16 @@ pub fn scan_volume(volume: &str) -> io::Result<()> {
         let root_file_id = get_file_id(Path::new(&root_path), &root_metadata);
 
         // Insert root itself as a fact
-        let root_created = root_metadata.created().ok().map(chrono::DateTime::from).unwrap_or_else(Utc::now);
-        let root_modified = root_metadata.modified().ok().map(chrono::DateTime::from).unwrap_or_else(Utc::now);
+        let root_created = root_metadata
+            .created()
+            .ok()
+            .map(chrono::DateTime::from)
+            .unwrap_or_else(Utc::now);
+        let root_modified = root_metadata
+            .modified()
+            .ok()
+            .map(chrono::DateTime::from)
+            .unwrap_or_else(Utc::now);
         batch.push(core_types::Fact {
             volume: vol_owned.clone(),
             file_id: root_file_id,
@@ -147,7 +166,9 @@ pub fn scan_volume(volume: &str) -> io::Result<()> {
             modified_at: root_modified,
         });
         dirs_scanned += 1;
-        tracker.dirs_scanned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracker
+            .dirs_scanned
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         fn walk(
             dir: &Path,
@@ -163,7 +184,9 @@ pub fn scan_volume(volume: &str) -> io::Result<()> {
             *tracker.current_path.lock().unwrap() = Some(dir.to_string_lossy().into_owned());
             if let Ok(entries) = fs::read_dir(dir) {
                 *dirs_scanned += 1;
-                tracker.dirs_scanned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracker
+                    .dirs_scanned
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 for entry in entries.flatten() {
                     let path = entry.path();
                     let metadata = match entry.metadata() {
@@ -171,9 +194,21 @@ pub fn scan_volume(volume: &str) -> io::Result<()> {
                         Err(_) => continue,
                     };
                     let file_id = get_file_id(&path, &metadata);
-                    let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                    let created = metadata.created().ok().map(chrono::DateTime::from).unwrap_or_else(Utc::now);
-                    let modified = metadata.modified().ok().map(chrono::DateTime::from).unwrap_or_else(Utc::now);
+                    let name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    let created = metadata
+                        .created()
+                        .ok()
+                        .map(chrono::DateTime::from)
+                        .unwrap_or_else(Utc::now);
+                    let modified = metadata
+                        .modified()
+                        .ok()
+                        .map(chrono::DateTime::from)
+                        .unwrap_or_else(Utc::now);
 
                     let file_type = match entry.file_type() {
                         Ok(t) => t,
@@ -201,10 +236,22 @@ pub fn scan_volume(volume: &str) -> io::Result<()> {
                     }
 
                     if is_dir && !is_symlink {
-                        walk(&path, file_id, volume, vol_owned, dirs_scanned, files_scanned, conn, batch, tracker);
+                        walk(
+                            &path,
+                            file_id,
+                            volume,
+                            vol_owned,
+                            dirs_scanned,
+                            files_scanned,
+                            conn,
+                            batch,
+                            tracker,
+                        );
                     } else if !is_dir {
                         *files_scanned += 1;
-                        tracker.files_scanned.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        tracker
+                            .files_scanned
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             }
@@ -225,7 +272,10 @@ pub fn scan_volume(volume: &str) -> io::Result<()> {
 
     // Flush any remaining facts
     if let Err(e) = flush_batch(&mut conn, &mut batch) {
-        eprintln!("[Scanner - {}] DB error flushing final batch: {:?}", volume, e);
+        eprintln!(
+            "[Scanner - {}] DB error flushing final batch: {:?}",
+            volume, e
+        );
     }
 
     // Done scanning this volume. Keep current_path clean.

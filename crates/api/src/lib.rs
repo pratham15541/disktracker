@@ -79,11 +79,14 @@ pub async fn run_server(pipe_path: &str) -> io::Result<()> {
         let vol_clone_drain = vol.clone();
 
         // Query the max mutation sequence currently in database for this volume
-        let startup_seq: i64 = conn.query_row(
-            "SELECT MAX(sequence) FROM mutation_log WHERE volume = ?1",
-            [&vol],
-            |row| row.get::<_, Option<i64>>(0)
-        ).unwrap_or(None).unwrap_or(0);
+        let startup_seq: i64 = conn
+            .query_row(
+                "SELECT MAX(sequence) FROM mutation_log WHERE volume = ?1",
+                [&vol],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap_or(None)
+            .unwrap_or(0);
 
         // Initialize state
         let tracker = core_types::get_volume_tracker(&vol);
@@ -186,21 +189,36 @@ where
 
 fn get_volume_progress(volume: &str, state: DaemonState) -> VolumeProgress {
     let tracker = core_types::get_volume_tracker(volume);
-    
+
     {
         let mut tracker_state = tracker.state.lock().unwrap();
         *tracker_state = state;
     }
 
-    let dirs_scanned = tracker.dirs_scanned.load(std::sync::atomic::Ordering::Relaxed);
-    let files_scanned = tracker.files_scanned.load(std::sync::atomic::Ordering::Relaxed);
+    let dirs_scanned = tracker
+        .dirs_scanned
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let files_scanned = tracker
+        .files_scanned
+        .load(std::sync::atomic::Ordering::Relaxed);
     let current_path = tracker.current_path.lock().unwrap().clone();
     let usn_start = tracker.usn_start.load(std::sync::atomic::Ordering::Relaxed);
-    let events_buffered = tracker.events_buffered.load(std::sync::atomic::Ordering::Relaxed);
+    let events_buffered = tracker
+        .events_buffered
+        .load(std::sync::atomic::Ordering::Relaxed);
     let replaying = tracker.replaying.load(std::sync::atomic::Ordering::Relaxed);
-    let mutations_replayed = tracker.mutations_replayed.load(std::sync::atomic::Ordering::Relaxed);
-    let mutations_total = if tracker.has_mutations_total.load(std::sync::atomic::Ordering::Relaxed) {
-        Some(tracker.mutations_total.load(std::sync::atomic::Ordering::Relaxed))
+    let mutations_replayed = tracker
+        .mutations_replayed
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let mutations_total = if tracker
+        .has_mutations_total
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        Some(
+            tracker
+                .mutations_total
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     } else {
         None
     };

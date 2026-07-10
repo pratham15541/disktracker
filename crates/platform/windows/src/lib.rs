@@ -40,7 +40,8 @@ pub async fn connect_client(path: &str) -> io::Result<PlatformClientStream> {
     loop {
         match tokio::net::windows::named_pipe::ClientOptions::new().open(path) {
             Ok(client) => return Ok(client),
-            Err(e) if e.raw_os_error() == Some(231) => { // ERROR_PIPE_BUSY
+            Err(e) if e.raw_os_error() == Some(231) => {
+                // ERROR_PIPE_BUSY
                 if start.elapsed() > Duration::from_secs(2) {
                     return Err(e);
                 }
@@ -238,12 +239,12 @@ extern "system" {
 #[cfg(windows)]
 pub fn get_file_size_by_id(volume: &str, file_id: u64) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ID_DESCRIPTOR, FileIdType,
-        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE,
-        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION
+        FileIdType, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_DESCRIPTOR, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
     };
-    use windows_sys::Win32::Foundation::{HANDLE, CloseHandle, INVALID_HANDLE_VALUE};
 
     unsafe {
         let vol_path = format!("\\\\.\\{}", volume);
@@ -386,15 +387,68 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
     const USN_REASON_RENAME_OLD_NAME: u32 = 0x00001000;
     const USN_REASON_RENAME_NEW_NAME: u32 = 0x00002000;
 
-    let conn = match storage::get_db_connection() {
+    let mut conn = match storage::get_db_connection() {
         Ok(c) => c,
-        Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+        Err(e) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        }
     };
 
     let tracker = core_types::get_volume_tracker(volume);
-    tracker.usn_start.store(start_usn, std::sync::atomic::Ordering::Relaxed);
+    tracker
+        .usn_start
+        .store(start_usn, std::sync::atomic::Ordering::Relaxed);
 
-    println!("[Watcher - {}] Initializing USN journal watch from {}", volume, start_usn);
+    struct WatcherMutation {
+        file_id: u64,
+        parent_file_id: u64,
+        name: String,
+        kind: String,
+        is_directory: bool,
+        at: String,
+    }
+
+    let mut pending_mutations = Vec::new();
+
+    let flush_watcher_batch = |conn_ref: &mut rusqlite::Connection,
+                               batch: &mut Vec<WatcherMutation>|
+     -> Result<(), rusqlite::Error> {
+        if batch.is_empty() {
+            return Ok(());
+        }
+        let tx = conn_ref.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO mutation_log (volume, file_id, parent_file_id, name, kind, is_directory, size_delta, at, source)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, 'Watcher')"
+            )?;
+            for m in batch.iter() {
+                let _ = stmt.execute(rusqlite::params![
+                    volume,
+                    m.file_id,
+                    m.parent_file_id,
+                    m.name,
+                    m.kind,
+                    if m.is_directory { 1 } else { 0 },
+                    m.at,
+                ]);
+            }
+        }
+        tx.commit()?;
+        tracker
+            .events_buffered
+            .fetch_add(batch.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        batch.clear();
+        Ok(())
+    };
+
+    println!(
+        "[Watcher - {}] Initializing USN journal watch from {}",
+        volume, start_usn
+    );
 
     let vol_path = format!("\\\\.\\{}", volume);
     let vol_path_w: Vec<u16> = std::ffi::OsStr::new(&vol_path)
@@ -444,10 +498,16 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
             std::ptr::null_mut(),
         );
 
-        println!("[Watcher - {}] FSCTL_QUERY_USN_JOURNAL success: {}, journal_id: {}", volume, success, journal_data.usn_journal_id);
+        println!(
+            "[Watcher - {}] FSCTL_QUERY_USN_JOURNAL success: {}, journal_id: {}",
+            volume, success, journal_data.usn_journal_id
+        );
         if success == 0 {
             let err = std::io::Error::last_os_error();
-            eprintln!("[Watcher - {}] FSCTL_QUERY_USN_JOURNAL failed: {:?}", volume, err);
+            eprintln!(
+                "[Watcher - {}] FSCTL_QUERY_USN_JOURNAL failed: {:?}",
+                volume, err
+            );
             CloseHandle(handle);
             return Err(err);
         }
@@ -499,6 +559,7 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
             }
 
             if bytes_returned <= 8 {
+                let _ = flush_watcher_batch(&mut conn, &mut pending_mutations);
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 continue;
             }
@@ -529,8 +590,6 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
                         u64::from_ne_bytes(buffer[offset + 8..offset + 16].try_into().unwrap());
                     let parent_ref =
                         u64::from_ne_bytes(buffer[offset + 16..offset + 24].try_into().unwrap());
-                    let record_usn =
-                        i64::from_ne_bytes(buffer[offset + 24..offset + 32].try_into().unwrap());
                     let reason =
                         u32::from_ne_bytes(buffer[offset + 40..offset + 44].try_into().unwrap());
                     let file_attributes =
@@ -553,16 +612,13 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
                         .collect();
                     let name_str = String::from_utf16_lossy(&name_u16);
 
-                    println!(
-                        "[Watcher - {}] USN: {}, Name: {}, FileRef: {}, ParentRef: {}, Reason: {:#X}, Attr: {:#X}",
-                        volume, record_usn, name_str, file_ref, parent_ref, reason, file_attributes
-                    );
-
                     let kind = if (reason & USN_REASON_FILE_DELETE) != 0 {
                         "Deleted"
                     } else if (reason & USN_REASON_FILE_CREATE) != 0 {
                         "Created"
-                    } else if (reason & (USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME)) != 0 {
+                    } else if (reason & (USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME))
+                        != 0
+                    {
                         "Renamed"
                     } else {
                         "Modified"
@@ -571,30 +627,23 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
                     let is_dir = (file_attributes & 0x10) != 0;
                     let timestamp_str = chrono::Utc::now().to_rfc3339();
 
-                    tracker.events_buffered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    pending_mutations.push(WatcherMutation {
+                        file_id: file_ref,
+                        parent_file_id: parent_ref,
+                        name: name_str,
+                        kind: kind.to_string(),
+                        is_directory: is_dir,
+                        at: timestamp_str,
+                    });
 
-                    let _ = conn.execute(
-                        "INSERT INTO mutation_log (volume, file_id, parent_file_id, name, kind, is_directory, size_delta, at, source)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        rusqlite::params![
-                            volume,
-                            file_ref,
-                            parent_ref,
-                            name_str,
-                            kind,
-                            if is_dir { 1 } else { 0 },
-                            0, // size_delta
-                            timestamp_str,
-                            "Watcher",
-                        ],
-                    );
+                    if pending_mutations.len() >= 500 {
+                        let _ = flush_watcher_batch(&mut conn, &mut pending_mutations);
+                    }
                 } else if major_version == 3 {
                     let file_ref =
                         u64::from_ne_bytes(buffer[offset + 8..offset + 16].try_into().unwrap());
                     let parent_ref =
                         u64::from_ne_bytes(buffer[offset + 24..offset + 32].try_into().unwrap());
-                    let record_usn =
-                        i64::from_ne_bytes(buffer[offset + 40..offset + 48].try_into().unwrap());
                     let reason =
                         u32::from_ne_bytes(buffer[offset + 56..offset + 60].try_into().unwrap());
                     let file_attributes =
@@ -617,16 +666,13 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
                         .collect();
                     let name_str = String::from_utf16_lossy(&name_u16);
 
-                    println!(
-                        "[Watcher - {}] USN: {}, Name: {}, FileRef: {} (V3), ParentRef: {} (V3), Reason: {:#X}, Attr: {:#X}",
-                        volume, record_usn, name_str, file_ref, parent_ref, reason, file_attributes
-                    );
-
                     let kind = if (reason & USN_REASON_FILE_DELETE) != 0 {
                         "Deleted"
                     } else if (reason & USN_REASON_FILE_CREATE) != 0 {
                         "Created"
-                    } else if (reason & (USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME)) != 0 {
+                    } else if (reason & (USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME))
+                        != 0
+                    {
                         "Renamed"
                     } else {
                         "Modified"
@@ -635,32 +681,25 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
                     let is_dir = (file_attributes & 0x10) != 0;
                     let timestamp_str = chrono::Utc::now().to_rfc3339();
 
-                    let _ = conn.execute(
-                        "INSERT INTO mutation_log (volume, file_id, parent_file_id, name, kind, is_directory, size_delta, at, source)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        rusqlite::params![
-                            volume,
-                            file_ref,
-                            parent_ref,
-                            name_str,
-                            kind,
-                            if is_dir { 1 } else { 0 },
-                            0, // size_delta
-                            timestamp_str,
-                            "Watcher",
-                        ],
-                    );
-                } else {
-                    println!(
-                        "[Watcher - {}] Warning: Unsupported USN Record Version: {}",
-                        volume, major_version
-                    );
+                    pending_mutations.push(WatcherMutation {
+                        file_id: file_ref,
+                        parent_file_id: parent_ref,
+                        name: name_str,
+                        kind: kind.to_string(),
+                        is_directory: is_dir,
+                        at: timestamp_str,
+                    });
+
+                    if pending_mutations.len() >= 500 {
+                        let _ = flush_watcher_batch(&mut conn, &mut pending_mutations);
+                    }
                 }
 
                 offset += record_len;
             }
         }
 
+        let _ = flush_watcher_batch(&mut conn, &mut pending_mutations);
         CloseHandle(handle);
     }
     Ok(())
@@ -670,11 +709,18 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
 pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<()> {
     let conn = match storage::get_db_connection() {
         Ok(c) => c,
-        Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+        Err(e) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                e.to_string(),
+            ))
+        }
     };
 
     let tracker = core_types::get_volume_tracker(volume);
-    tracker.usn_start.store(start_usn, std::sync::atomic::Ordering::Relaxed);
+    tracker
+        .usn_start
+        .store(start_usn, std::sync::atomic::Ordering::Relaxed);
 
     // Query mock root directory's real file_id (inode) so facts foreign key constraint is satisfied
     let root_path = format!("/tmp/disktracker_mock_{}", volume);
@@ -711,7 +757,9 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
             volume, start_usn + event_count, name_str, file_id, parent_file_id
         );
 
-        tracker.events_buffered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracker
+            .events_buffered
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         let _ = conn.execute(
             "INSERT INTO mutation_log (volume, file_id, parent_file_id, name, kind, is_directory, size_delta, at, source)
@@ -751,124 +799,161 @@ fn filetime_to_datetime(filetime: i64) -> chrono::DateTime<chrono::Utc> {
 }
 
 #[cfg(windows)]
-fn walk_dir_recursive<F>(
-    dir_path: &std::path::Path,
-    parent_file_id: u64,
+fn walk_dir_iterative<F>(
+    root_path: &std::path::Path,
+    root_file_id: u64,
     volume: &str,
     callback: &mut F,
 ) -> io::Result<()>
 where
     F: FnMut(FastFileInfo),
 {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandleEx, FILE_LIST_DIRECTORY, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FILE_SHARE_DELETE, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS,
-        FileIdBothDirectoryRestartInfo, FileIdBothDirectoryInfo, FILE_ID_BOTH_DIR_INFO,
-    };
-    use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_FILES};
-    use crate::win32::{CreateFileW, CloseHandle};
+    use crate::win32::{CloseHandle, CreateFileW};
     use std::ffi::c_void;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_NO_MORE_FILES};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdBothDirectoryInfo, FileIdBothDirectoryRestartInfo, GetFileInformationByHandleEx,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_BOTH_DIR_INFO, FILE_LIST_DIRECTORY, FILE_SHARE_DELETE,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
 
-    let dir_path_w: Vec<u16> = dir_path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    
-    unsafe {
-        let handle = CreateFileW(
-            dir_path_w.as_ptr(),
-            FILE_LIST_DIRECTORY,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS,
-            0,
-        );
+    struct TargetDir {
+        path: std::path::PathBuf,
+        parent_file_id: u64,
+    }
 
-        if handle == -1 {
-            return Err(io::Error::last_os_error());
-        }
+    let mut stack = vec![TargetDir {
+        path: root_path.to_path_buf(),
+        parent_file_id: root_file_id,
+    }];
 
-        const BUF_SIZE: usize = 65536;
-        let mut buffer = vec![0u8; BUF_SIZE];
+    const BUF_SIZE: usize = 65536;
+    let mut buffer = vec![0u8; BUF_SIZE];
 
-        let mut is_first = true;
-        
-        loop {
-            let class = if is_first {
-                FileIdBothDirectoryRestartInfo
-            } else {
-                FileIdBothDirectoryInfo
-            };
+    while let Some(target) = stack.pop() {
+        let dir_path_w: Vec<u16> = target
+            .path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
 
-            let success = GetFileInformationByHandleEx(
-                handle,
-                class,
-                buffer.as_mut_ptr() as *mut c_void,
-                BUF_SIZE as u32,
+        unsafe {
+            let handle = CreateFileW(
+                dir_path_w.as_ptr(),
+                FILE_LIST_DIRECTORY,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                std::ptr::null(),
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS,
+                0,
             );
 
-            if success == 0 {
-                let err = GetLastError();
-                if err == ERROR_NO_MORE_FILES {
-                    break;
+            if handle == -1 {
+                let err = io::Error::last_os_error();
+                if target.path == root_path {
+                    return Err(err);
                 } else {
-                    CloseHandle(handle);
-                    return Err(io::Error::from_raw_os_error(err as i32));
+                    eprintln!(
+                        "[Scanner - {}] Warning: failed to crawl subfolder {:?}: {:?}",
+                        volume, target.path, err
+                    );
+                    continue;
                 }
             }
 
-            is_first = false;
-
-            let mut offset = 0;
+            let mut is_first = true;
             loop {
-                let entry_ptr = buffer.as_ptr().add(offset) as *const FILE_ID_BOTH_DIR_INFO;
+                let class = if is_first {
+                    FileIdBothDirectoryRestartInfo
+                } else {
+                    FileIdBothDirectoryInfo
+                };
 
-                let next_entry_offset = std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).NextEntryOffset));
-                let file_attributes = std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).FileAttributes));
-                let file_id = std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).FileId)) as u64;
-                let creation_time = std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).CreationTime));
-                let last_write_time = std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).LastWriteTime));
-                let end_of_file = std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).EndOfFile)) as u64;
-                let file_name_length = std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).FileNameLength)) as usize;
+                let success = GetFileInformationByHandleEx(
+                    handle,
+                    class,
+                    buffer.as_mut_ptr() as *mut c_void,
+                    BUF_SIZE as u32,
+                );
 
-                let name_len = file_name_length / 2;
-                let name_ptr = std::ptr::addr_of!((*entry_ptr).FileName) as *const u16;
-                let name_slice = std::slice::from_raw_parts(name_ptr, name_len);
-                let name = String::from_utf16_lossy(name_slice);
-
-                if name != "." && name != ".." {
-                    let created_at = filetime_to_datetime(creation_time);
-                    let modified_at = filetime_to_datetime(last_write_time);
-                    let is_reparse = (file_attributes & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-                    let is_dir = (file_attributes & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY) != 0;
-
-                    let info = FastFileInfo {
-                        file_id,
-                        parent_file_id,
-                        name: name.clone(),
-                        is_directory: is_dir,
-                        size: end_of_file,
-                        created_at,
-                        modified_at,
-                    };
-
-                    callback(info);
-
-                    if is_dir && !is_reparse {
-                        let sub_path = dir_path.join(&name);
-                        if let Err(e) = walk_dir_recursive(&sub_path, file_id, volume, callback) {
-                            eprintln!("[Scanner - {}] Warning: failed to crawl subfolder {:?}: {:?}", volume, sub_path, e);
-                        }
+                if success == 0 {
+                    let err = GetLastError();
+                    if err == ERROR_NO_MORE_FILES {
+                        break;
+                    } else {
+                        break;
                     }
                 }
 
-                if next_entry_offset == 0 {
-                    break;
-                }
-                offset += next_entry_offset as usize;
-            }
-        }
+                is_first = false;
 
-        CloseHandle(handle);
+                let mut offset = 0;
+                loop {
+                    let entry_ptr = buffer.as_ptr().add(offset) as *const FILE_ID_BOTH_DIR_INFO;
+
+                    let next_entry_offset =
+                        std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).NextEntryOffset));
+                    let file_attributes =
+                        std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).FileAttributes));
+                    let file_id =
+                        std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).FileId)) as u64;
+                    let creation_time =
+                        std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).CreationTime));
+                    let last_write_time =
+                        std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).LastWriteTime));
+                    let end_of_file =
+                        std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).EndOfFile)) as u64;
+                    let file_name_length =
+                        std::ptr::read_unaligned(std::ptr::addr_of!((*entry_ptr).FileNameLength))
+                            as usize;
+
+                    let name_len = file_name_length / 2;
+                    let name_ptr = std::ptr::addr_of!((*entry_ptr).FileName) as *const u16;
+                    let name_slice = std::slice::from_raw_parts(name_ptr, name_len);
+                    let name = String::from_utf16_lossy(name_slice);
+
+                    if name != "." && name != ".." {
+                        let created_at = filetime_to_datetime(creation_time);
+                        let modified_at = filetime_to_datetime(last_write_time);
+                        let is_reparse = (file_attributes
+                            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT)
+                            != 0;
+                        let is_dir = (file_attributes
+                            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY)
+                            != 0;
+
+                        let info = FastFileInfo {
+                            file_id,
+                            parent_file_id: target.parent_file_id,
+                            name: name.clone(),
+                            is_directory: is_dir,
+                            size: end_of_file,
+                            created_at,
+                            modified_at,
+                        };
+
+                        callback(info);
+
+                        if is_dir && !is_reparse {
+                            let sub_path = target.path.join(&name);
+                            stack.push(TargetDir {
+                                path: sub_path,
+                                parent_file_id: file_id,
+                            });
+                        }
+                    }
+
+                    if next_entry_offset == 0 {
+                        break;
+                    }
+                    offset += next_entry_offset as usize;
+                }
+            }
+
+            CloseHandle(handle);
+        }
     }
     Ok(())
 }
@@ -878,16 +963,19 @@ pub fn walk_directory_fast<F>(root_path: &str, volume: &str, mut callback: F) ->
 where
     F: FnMut(FastFileInfo),
 {
+    use crate::win32::{CloseHandle, CreateFileW};
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, FILE_SHARE_DELETE, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS,
-        BY_HANDLE_FILE_INFORMATION,
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
-    use crate::win32::{CreateFileW, CloseHandle};
 
-    let path_w: Vec<u16> = std::path::Path::new(root_path).as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    
+    let path_w: Vec<u16> = std::path::Path::new(root_path)
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
     let root_file_id = unsafe {
         let handle = CreateFileW(
             path_w.as_ptr(),
@@ -915,8 +1003,16 @@ where
     };
 
     let root_metadata = std::fs::metadata(root_path)?;
-    let root_created = root_metadata.created().ok().map(chrono::DateTime::from).unwrap_or_else(chrono::Utc::now);
-    let root_modified = root_metadata.modified().ok().map(chrono::DateTime::from).unwrap_or_else(chrono::Utc::now);
+    let root_created = root_metadata
+        .created()
+        .ok()
+        .map(chrono::DateTime::from)
+        .unwrap_or_else(chrono::Utc::now);
+    let root_modified = root_metadata
+        .modified()
+        .ok()
+        .map(chrono::DateTime::from)
+        .unwrap_or_else(chrono::Utc::now);
 
     callback(FastFileInfo {
         file_id: root_file_id,
@@ -928,9 +1024,13 @@ where
         modified_at: root_modified,
     });
 
-    walk_dir_recursive(std::path::Path::new(root_path), root_file_id, volume, &mut callback)
+    walk_dir_iterative(
+        std::path::Path::new(root_path),
+        root_file_id,
+        volume,
+        &mut callback,
+    )
 }
-
 
 #[cfg(not(windows))]
 #[derive(Debug, Clone)]
@@ -987,10 +1087,8 @@ pub fn check_volume_usn(_volume: &str) -> std::io::Result<()> {
 
 #[cfg(windows)]
 pub fn kill_process_by_pid(pid: u32) -> std::io::Result<()> {
-    use windows_sys::Win32::System::Threading::{
-        OpenProcess, TerminateProcess, PROCESS_TERMINATE
-    };
     use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
 
     unsafe {
         let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);

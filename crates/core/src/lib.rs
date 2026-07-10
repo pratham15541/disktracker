@@ -109,8 +109,8 @@ pub struct ProgressSnapshot {
     pub volumes: std::collections::HashMap<String, VolumeProgress>,
 }
 
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::sync::atomic::{AtomicU64, AtomicBool};
 
 pub struct VolumeProgressTracker {
     pub state: Mutex<DaemonState>,
@@ -125,7 +125,9 @@ pub struct VolumeProgressTracker {
     pub has_mutations_total: AtomicBool,
 }
 
-static PROGRESS_REGISTRY: OnceLock<Mutex<std::collections::HashMap<String, Arc<VolumeProgressTracker>>>> = OnceLock::new();
+static PROGRESS_REGISTRY: OnceLock<
+    Mutex<std::collections::HashMap<String, Arc<VolumeProgressTracker>>>,
+> = OnceLock::new();
 
 pub fn get_volume_tracker(volume: &str) -> Arc<VolumeProgressTracker> {
     let registry = PROGRESS_REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()));

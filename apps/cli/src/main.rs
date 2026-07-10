@@ -265,13 +265,17 @@ async fn run_doctor() {
     // 4. Check SQLite database integrity
     match storage::get_db_connection() {
         Ok(conn) => {
-            let integrity: Result<String, rusqlite::Error> = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0));
+            let integrity: Result<String, rusqlite::Error> =
+                conn.query_row("PRAGMA integrity_check", [], |row| row.get(0));
             match integrity {
                 Ok(status) if status == "ok" => {
                     println!("  [OK] SQLite database integrity");
                 }
                 Ok(status) => {
-                    println!("  [FAIL] SQLite database integrity check returned: {}", status);
+                    println!(
+                        "  [FAIL] SQLite database integrity check returned: {}",
+                        status
+                    );
                     all_ok = false;
                 }
                 Err(e) => {
@@ -281,7 +285,10 @@ async fn run_doctor() {
             }
         }
         Err(e) => {
-            println!("  [FAIL] SQLite database integrity: Failed to connect to SQLite database: {:?}", e);
+            println!(
+                "  [FAIL] SQLite database integrity: Failed to connect to SQLite database: {:?}",
+                e
+            );
             all_ok = false;
         }
     }
@@ -303,7 +310,11 @@ async fn run_doctor() {
                 }
             }
             if usn_ok {
-                println!("  [OK] USN Journal availability (Verified {} volumes: {:?})", volumes.len(), volumes);
+                println!(
+                    "  [OK] USN Journal availability (Verified {} volumes: {:?})",
+                    volumes.len(),
+                    volumes
+                );
             }
         }
     }
@@ -324,7 +335,7 @@ async fn run_uninstall() -> Result<(), Box<dyn std::error::Error>> {
     print!("Are you sure you want to stop the daemon and delete all database files? [y/N]: ");
     use std::io::Write;
     std::io::stdout().flush()?;
-    
+
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
     let input = input.trim().to_lowercase();
@@ -359,7 +370,10 @@ async fn run_uninstall() -> Result<(), Box<dyn std::error::Error>> {
     // 2. Delete SQLite database files and AppData folder
     let db_dir = storage::get_db_dir()?;
     if db_dir.exists() {
-        println!("[Cli] Deleting database files and directory at {:?}...", db_dir);
+        println!(
+            "[Cli] Deleting database files and directory at {:?}...",
+            db_dir
+        );
         std::fs::remove_dir_all(&db_dir)?;
         println!("  [OK] Database files and directory deleted.");
     } else {
@@ -371,7 +385,10 @@ async fn run_uninstall() -> Result<(), Box<dyn std::error::Error>> {
     {
         let socket_path = "/tmp/disktracker.sock";
         if std::path::Path::new(socket_path).exists() {
-            println!("[Cli] (Unix Fallback) Deleting socket file at {}...", socket_path);
+            println!(
+                "[Cli] (Unix Fallback) Deleting socket file at {}...",
+                socket_path
+            );
             let _ = std::fs::remove_file(socket_path);
             println!("  [OK] Socket file deleted.");
         }
@@ -381,7 +398,10 @@ async fn run_uninstall() -> Result<(), Box<dyn std::error::Error>> {
         for vol in volumes {
             let mock_path = format!("/tmp/disktracker_mock_{}", vol);
             if std::path::Path::new(&mock_path).exists() {
-                println!("[Cli] (Unix Fallback) Deleting mock folder at {}...", mock_path);
+                println!(
+                    "[Cli] (Unix Fallback) Deleting mock folder at {}...",
+                    mock_path
+                );
                 let _ = std::fs::remove_dir_all(&mock_path);
             }
         }
