@@ -71,6 +71,13 @@ pub async fn run_drain_engine(volume: String, startup_seq: i64) {
                     "[DrainEngine - {}] Caught up with mutation log. State is Live.",
                     volume
                 );
+                drop(state_lock);
+                // FIX 3: Force a final commit of any staged Tantivy mutations accumulated
+                // during the replay. Without this, deletes staged in the last batch are
+                // not visible to readers until the first Live-mode poll (up to 500ms away),
+                // causing stale search results immediately after going Live.
+                let _ = crate::search::commit_search_index();
+                println!("[DrainEngine - {}] Final search index commit done.", volume);
             }
             break;
         }
@@ -136,37 +143,24 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
         return Ok(0);
     }
 
-    let max_sequence: u64 = conn
-        .query_row(
-            "SELECT IFNULL(MAX(sequence), 0) FROM mutation_log WHERE volume = ?1",
-            [volume],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
-
-    tracker
-        .mutations_total
-        .store(max_sequence, std::sync::atomic::Ordering::Relaxed);
-    tracker
-        .has_mutations_total
-        .store(true, std::sync::atomic::Ordering::Relaxed);
     tracker
         .replaying
         .store(true, std::sync::atomic::Ordering::Relaxed);
 
     // 3. Process mutations in a transaction
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute("PRAGMA defer_foreign_keys = ON", [])?;
     {
         let mut insert_fact_stmt = tx.prepare_cached(
-            "INSERT INTO facts (volume, file_id, parent_file_id, name, is_directory, size, created_at, modified_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO facts (volume, file_id, parent_file_id, name, is_directory, size, created_at, modified_at, attributes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(volume, file_id) DO UPDATE SET
                 parent_file_id = excluded.parent_file_id,
                 name = excluded.name,
                 is_directory = excluded.is_directory,
                 size = excluded.size,
-                modified_at = excluded.modified_at"
+                modified_at = excluded.modified_at,
+                attributes = excluded.attributes"
         )?;
 
         let mut delete_fact_stmt =
@@ -177,10 +171,6 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
         )?;
 
         for m in &mutations {
-            println!(
-                "[DrainEngine - {}] Replaying mutation sequence {}: file_id={}, parent_file_id={}, name={}, kind={}, is_dir={}",
-                volume, m.sequence, m.file_id, m.parent_file_id, m.name, m.kind, m.is_directory
-            );
             match m.kind.as_str() {
                 "Created" | "Modified" => {
                     // UPSERT fact
@@ -189,12 +179,14 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
                     } else {
                         m.size_delta.max(0) as u64
                     };
-                    if !m.is_directory {
-                        if let Some(real_size) =
-                            platform_windows::get_file_size_by_id(volume, m.file_id)
-                        {
+                    let mut attributes = 0u32;
+                    if let Some((real_size, real_attrs)) =
+                        platform_windows::get_file_info_by_id(volume, m.file_id)
+                    {
+                        if !m.is_directory {
                             size = real_size;
                         }
+                        attributes = real_attrs;
                     }
                     if let Err(e) = insert_fact_stmt.execute(rusqlite::params![
                         volume,
@@ -205,6 +197,7 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
                         size,
                         m.at,
                         m.at,
+                        attributes,
                     ]) {
                         eprintln!(
                             "[DrainEngine - {}] DB error replaying fact {}: {:?}",
@@ -249,13 +242,22 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
     }
     tx.commit()?;
 
+    // Sync to Tantivy search index after DB transaction succeeds
+    for m in &mutations {
+        match m.kind.as_str() {
+            "Created" | "Modified" | "Renamed" => {
+                let _ = crate::search::update_fact_in_index(conn, volume, m.file_id);
+            }
+            "Deleted" => {
+                let _ = crate::search::delete_fact_from_index(volume, m.file_id);
+            }
+            _ => {}
+        }
+    }
+    let _ = crate::search::commit_search_index();
+
     tracker
         .mutations_replayed
         .store(last_sequence as u64, std::sync::atomic::Ordering::Relaxed);
-
-    println!(
-        "[DrainEngine - {}] Replayed batch up to sequence {}",
-        volume, last_sequence
-    );
     Ok(mutations.len())
 }

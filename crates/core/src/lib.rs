@@ -62,6 +62,7 @@ pub struct Fact {
     pub size: u64,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub modified_at: chrono::DateTime<chrono::Utc>,
+    pub attributes: u32,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,6 +108,8 @@ pub struct ProgressSnapshot {
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub state: DaemonState, // Live when all volumes are Live
     pub volumes: std::collections::HashMap<String, VolumeProgress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_db_modified: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 use std::sync::atomic::{AtomicBool, AtomicU64};
