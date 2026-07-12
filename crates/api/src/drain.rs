@@ -131,7 +131,7 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
     tracker.replaying.store(true, std::sync::atomic::Ordering::Relaxed);
 
     // 3. Process mutations in a transaction
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute("PRAGMA defer_foreign_keys = ON", [])?;
     {
         let mut insert_fact_stmt = tx.prepare_cached(

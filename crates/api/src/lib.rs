@@ -562,6 +562,7 @@ async fn handle_request(
                         "results": results,
                         "volumes_incomplete": volumes_incomplete.into_iter().collect::<Vec<_>>(),
                         "last_db_modified": last_db_modified,
+                        "index_rebuilding": search::REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst),
                     });
                     JsonRpcResponse::success(req.id, res)
                 }

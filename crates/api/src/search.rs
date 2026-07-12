@@ -278,6 +278,7 @@ async fn rebuild_index_task(si: &'static SearchIndex, meta_path: PathBuf) -> Res
         if (attrs & 1) != 0 { doc.add_text(si.attributes, "readonly"); }
         if (attrs & 2) != 0 { doc.add_text(si.attributes, "hidden"); }
         if (attrs & 4) != 0 { doc.add_text(si.attributes, "system"); }
+        if (attrs & 32) != 0 { doc.add_text(si.attributes, "archive"); }
         if (attrs & 1024) != 0 { doc.add_text(si.attributes, "reparse"); }
 
         writer_guard.add_document(doc).map_err(|e| e.to_string())?;
@@ -358,6 +359,7 @@ pub fn update_fact_in_index(conn: &Connection, volume: &str, file_id: u64) -> Re
         if (attrs & 1) != 0 { doc.add_text(si.attributes, "readonly"); }
         if (attrs & 2) != 0 { doc.add_text(si.attributes, "hidden"); }
         if (attrs & 4) != 0 { doc.add_text(si.attributes, "system"); }
+        if (attrs & 32) != 0 { doc.add_text(si.attributes, "archive"); }
         if (attrs & 1024) != 0 { doc.add_text(si.attributes, "reparse"); }
 
         writer_guard.add_document(doc).map_err(|e| e.to_string())?;

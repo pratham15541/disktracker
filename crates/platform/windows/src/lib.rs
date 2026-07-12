@@ -435,7 +435,7 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
     const USN_REASON_RENAME_OLD_NAME: u32 = 0x00001000;
     const USN_REASON_RENAME_NEW_NAME: u32 = 0x00002000;
 
-    let conn = match storage::get_db_connection() {
+    let mut conn = match storage::get_db_connection() {
         Ok(c) => c,
         Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
     };
@@ -556,157 +556,165 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
             let next_usn = u64::from_ne_bytes(buffer[0..8].try_into().unwrap());
             read_data.start_usn = next_usn as i64;
 
-            while offset < bytes_returned as usize {
-                if offset + 4 > bytes_returned as usize {
-                    break;
-                }
-
-                let record_len =
-                    u32::from_ne_bytes(buffer[offset..offset + 4].try_into().unwrap()) as usize;
-                if record_len == 0 {
-                    break;
-                }
-
-                if offset + record_len > bytes_returned as usize {
-                    break;
-                }
-
-                let major_version =
-                    u16::from_ne_bytes(buffer[offset + 4..offset + 6].try_into().unwrap());
-                if major_version == 2 {
-                    let file_ref =
-                        u64::from_ne_bytes(buffer[offset + 8..offset + 16].try_into().unwrap());
-                    let parent_ref =
-                        u64::from_ne_bytes(buffer[offset + 16..offset + 24].try_into().unwrap());
-                    let record_usn =
-                        i64::from_ne_bytes(buffer[offset + 24..offset + 32].try_into().unwrap());
-                    let reason =
-                        u32::from_ne_bytes(buffer[offset + 40..offset + 44].try_into().unwrap());
-                    let file_attributes =
-                        u32::from_ne_bytes(buffer[offset + 48..offset + 52].try_into().unwrap());
-
-                    let name_len =
-                        u16::from_ne_bytes(buffer[offset + 52..offset + 54].try_into().unwrap())
-                            as usize;
-                    let name_offset =
-                        u16::from_ne_bytes(buffer[offset + 54..offset + 56].try_into().unwrap())
-                            as usize;
-
-                    let name_start = offset + name_offset;
-                    let name_end = name_start + name_len;
-                    let name_bytes = &buffer[name_start..name_end];
-
-                    let name_u16: Vec<u16> = name_bytes
-                        .chunks_exact(2)
-                        .map(|chunk| u16::from_ne_bytes(chunk.try_into().unwrap()))
-                        .collect();
-                    let name_str = String::from_utf16_lossy(&name_u16);
-
-                    println!(
-                        "[Watcher - {}] USN: {}, Name: {}, FileRef: {}, ParentRef: {}, Reason: {:#X}, Attr: {:#X}",
-                        volume, record_usn, name_str, file_ref, parent_ref, reason, file_attributes
-                    );
-
-                    let kind = if (reason & USN_REASON_FILE_DELETE) != 0 {
-                        "Deleted"
-                    } else if (reason & USN_REASON_FILE_CREATE) != 0 {
-                        "Created"
-                    } else if (reason & (USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME)) != 0 {
-                        "Renamed"
-                    } else {
-                        "Modified"
-                    };
-
-                    let is_dir = (file_attributes & 0x10) != 0;
-                    let timestamp_str = chrono::Utc::now().to_rfc3339();
-
-                    tracker.events_buffered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                    let _ = conn.execute(
+            let tx_res = (|| {
+                let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+                {
+                    let mut stmt = tx.prepare_cached(
                         "INSERT INTO mutation_log (volume, file_id, parent_file_id, name, kind, is_directory, size_delta, at, source)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        rusqlite::params![
-                            volume,
-                            file_ref,
-                            parent_ref,
-                            name_str,
-                            kind,
-                            if is_dir { 1 } else { 0 },
-                            0, // size_delta
-                            timestamp_str,
-                            "Watcher",
-                        ],
-                    );
-                } else if major_version == 3 {
-                    let file_ref =
-                        u64::from_ne_bytes(buffer[offset + 8..offset + 16].try_into().unwrap());
-                    let parent_ref =
-                        u64::from_ne_bytes(buffer[offset + 24..offset + 32].try_into().unwrap());
-                    let record_usn =
-                        i64::from_ne_bytes(buffer[offset + 40..offset + 48].try_into().unwrap());
-                    let reason =
-                        u32::from_ne_bytes(buffer[offset + 56..offset + 60].try_into().unwrap());
-                    let file_attributes =
-                        u32::from_ne_bytes(buffer[offset + 68..offset + 72].try_into().unwrap());
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"
+                    )?;
 
-                    let name_len =
-                        u16::from_ne_bytes(buffer[offset + 72..offset + 74].try_into().unwrap())
-                            as usize;
-                    let name_offset =
-                        u16::from_ne_bytes(buffer[offset + 74..offset + 76].try_into().unwrap())
-                            as usize;
+                    while offset < bytes_returned as usize {
+                        if offset + 4 > bytes_returned as usize {
+                            break;
+                        }
 
-                    let name_start = offset + name_offset;
-                    let name_end = name_start + name_len;
-                    let name_bytes = &buffer[name_start..name_end];
+                        let record_len =
+                            u32::from_ne_bytes(buffer[offset..offset + 4].try_into().unwrap()) as usize;
+                        if record_len == 0 {
+                            break;
+                        }
 
-                    let name_u16: Vec<u16> = name_bytes
-                        .chunks_exact(2)
-                        .map(|chunk| u16::from_ne_bytes(chunk.try_into().unwrap()))
-                        .collect();
-                    let name_str = String::from_utf16_lossy(&name_u16);
+                        if offset + record_len > bytes_returned as usize {
+                            break;
+                        }
 
-                    println!(
-                        "[Watcher - {}] USN: {}, Name: {}, FileRef: {} (V3), ParentRef: {} (V3), Reason: {:#X}, Attr: {:#X}",
-                        volume, record_usn, name_str, file_ref, parent_ref, reason, file_attributes
-                    );
+                        let major_version =
+                            u16::from_ne_bytes(buffer[offset + 4..offset + 6].try_into().unwrap());
+                        if major_version == 2 {
+                            let file_ref =
+                                u64::from_ne_bytes(buffer[offset + 8..offset + 16].try_into().unwrap());
+                            let parent_ref =
+                                u64::from_ne_bytes(buffer[offset + 16..offset + 24].try_into().unwrap());
+                            let record_usn =
+                                i64::from_ne_bytes(buffer[offset + 24..offset + 32].try_into().unwrap());
+                            let reason =
+                                u32::from_ne_bytes(buffer[offset + 40..offset + 44].try_into().unwrap());
+                            let file_attributes =
+                                u32::from_ne_bytes(buffer[offset + 48..offset + 52].try_into().unwrap());
 
-                    let kind = if (reason & USN_REASON_FILE_DELETE) != 0 {
-                        "Deleted"
-                    } else if (reason & USN_REASON_FILE_CREATE) != 0 {
-                        "Created"
-                    } else if (reason & (USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME)) != 0 {
-                        "Renamed"
-                    } else {
-                        "Modified"
-                    };
+                            let name_len =
+                                u16::from_ne_bytes(buffer[offset + 52..offset + 54].try_into().unwrap())
+                                    as usize;
+                            let name_offset =
+                                u16::from_ne_bytes(buffer[offset + 54..offset + 56].try_into().unwrap())
+                                    as usize;
 
-                    let is_dir = (file_attributes & 0x10) != 0;
-                    let timestamp_str = chrono::Utc::now().to_rfc3339();
+                            let name_start = offset + name_offset;
+                            let name_end = name_start + name_len;
+                            let name_bytes = &buffer[name_start..name_end];
 
-                    let _ = conn.execute(
-                        "INSERT INTO mutation_log (volume, file_id, parent_file_id, name, kind, is_directory, size_delta, at, source)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                        rusqlite::params![
-                            volume,
-                            file_ref,
-                            parent_ref,
-                            name_str,
-                            kind,
-                            if is_dir { 1 } else { 0 },
-                            0, // size_delta
-                            timestamp_str,
-                            "Watcher",
-                        ],
-                    );
-                } else {
-                    println!(
-                        "[Watcher - {}] Warning: Unsupported USN Record Version: {}",
-                        volume, major_version
-                    );
+                            let name_u16: Vec<u16> = name_bytes
+                                .chunks_exact(2)
+                                .map(|chunk| u16::from_ne_bytes(chunk.try_into().unwrap()))
+                                .collect();
+                            let name_str = String::from_utf16_lossy(&name_u16);
+
+                            println!(
+                                "[Watcher - {}] USN: {}, Name: {}, FileRef: {}, ParentRef: {}, Reason: {:#X}, Attr: {:#X}",
+                                volume, record_usn, name_str, file_ref, parent_ref, reason, file_attributes
+                            );
+
+                            let kind = if (reason & USN_REASON_FILE_DELETE) != 0 {
+                                "Deleted"
+                            } else if (reason & USN_REASON_FILE_CREATE) != 0 {
+                                "Created"
+                            } else if (reason & (USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME)) != 0 {
+                                "Renamed"
+                            } else {
+                                "Modified"
+                            };
+
+                            let is_dir = (file_attributes & 0x10) != 0;
+                            let timestamp_str = chrono::Utc::now().to_rfc3339();
+
+                            tracker.events_buffered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+                            stmt.execute(rusqlite::params![
+                                volume,
+                                file_ref,
+                                parent_ref,
+                                name_str,
+                                kind,
+                                if is_dir { 1 } else { 0 },
+                                0, // size_delta
+                                timestamp_str,
+                                "Watcher",
+                            ])?;
+                        } else if major_version == 3 {
+                            let file_ref =
+                                u64::from_ne_bytes(buffer[offset + 8..offset + 16].try_into().unwrap());
+                            let parent_ref =
+                                u64::from_ne_bytes(buffer[offset + 24..offset + 32].try_into().unwrap());
+                            let record_usn =
+                                i64::from_ne_bytes(buffer[offset + 40..offset + 48].try_into().unwrap());
+                            let reason =
+                                u32::from_ne_bytes(buffer[offset + 56..offset + 60].try_into().unwrap());
+                            let file_attributes =
+                                u32::from_ne_bytes(buffer[offset + 68..offset + 72].try_into().unwrap());
+
+                            let name_len =
+                                u16::from_ne_bytes(buffer[offset + 72..offset + 74].try_into().unwrap())
+                                    as usize;
+                            let name_offset =
+                                u16::from_ne_bytes(buffer[offset + 74..offset + 76].try_into().unwrap())
+                                    as usize;
+
+                            let name_start = offset + name_offset;
+                            let name_end = name_start + name_len;
+                            let name_bytes = &buffer[name_start..name_end];
+
+                            let name_u16: Vec<u16> = name_bytes
+                                .chunks_exact(2)
+                                .map(|chunk| u16::from_ne_bytes(chunk.try_into().unwrap()))
+                                .collect();
+                            let name_str = String::from_utf16_lossy(&name_u16);
+
+                            println!(
+                                "[Watcher - {}] USN: {}, Name: {}, FileRef: {} (V3), ParentRef: {} (V3), Reason: {:#X}, Attr: {:#X}",
+                                volume, record_usn, name_str, file_ref, parent_ref, reason, file_attributes
+                            );
+
+                            let kind = if (reason & USN_REASON_FILE_DELETE) != 0 {
+                                "Deleted"
+                            } else if (reason & USN_REASON_FILE_CREATE) != 0 {
+                                "Created"
+                            } else if (reason & (USN_REASON_RENAME_OLD_NAME | USN_REASON_RENAME_NEW_NAME)) != 0 {
+                                "Renamed"
+                            } else {
+                                "Modified"
+                            };
+
+                            let is_dir = (file_attributes & 0x10) != 0;
+                            let timestamp_str = chrono::Utc::now().to_rfc3339();
+
+                            stmt.execute(rusqlite::params![
+                                volume,
+                                file_ref,
+                                parent_ref,
+                                name_str,
+                                kind,
+                                if is_dir { 1 } else { 0 },
+                                0, // size_delta
+                                timestamp_str,
+                                "Watcher",
+                            ])?;
+                        } else {
+                            println!(
+                                "[Watcher - {}] Warning: Unsupported USN Record Version: {}",
+                                volume, major_version
+                            );
+                        }
+
+                        offset += record_len;
+                    }
                 }
+                tx.commit()?;
+                Ok::<(), rusqlite::Error>(())
+            })();
 
-                offset += record_len;
+            if let Err(e) = tx_res {
+                eprintln!("[Watcher - {}] DB error inserting USN batch: {:?}", volume, e);
             }
         }
 

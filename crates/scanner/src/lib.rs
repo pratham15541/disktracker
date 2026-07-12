@@ -24,43 +24,47 @@ fn flush_batch(conn: &mut Connection, batch: &mut Vec<core_types::Fact>) -> Resu
     if batch.is_empty() {
         return Ok(());
     }
-    let tx = conn.transaction()?;
-    tx.execute("PRAGMA defer_foreign_keys = ON", [])?;
-    {
-        let mut stmt = tx.prepare_cached(
-            "INSERT INTO facts (volume, file_id, parent_file_id, name, is_directory, size, created_at, modified_at, attributes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(volume, file_id) DO UPDATE SET
-                parent_file_id = excluded.parent_file_id,
-                name = excluded.name,
-                is_directory = excluded.is_directory,
-                size = excluded.size,
-                modified_at = excluded.modified_at,
-                attributes = excluded.attributes"
-        )?;
-        let mut visited_stmt = tx.prepare_cached(
-            "INSERT OR IGNORE INTO temp.visited_files (file_id) VALUES (?1)"
-        )?;
-        for fact in batch.iter() {
-            let created_str = fact.created_at.to_rfc3339();
-            let modified_str = fact.modified_at.to_rfc3339();
-            stmt.execute(rusqlite::params![
-                fact.volume,
-                fact.file_id,
-                fact.parent_file_id,
-                fact.name,
-                if fact.is_directory { 1 } else { 0 },
-                fact.size,
-                created_str,
-                modified_str,
-                fact.attributes,
-            ])?;
-            visited_stmt.execute(rusqlite::params![fact.file_id])?;
+    let res = (|| {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute("PRAGMA defer_foreign_keys = ON", [])?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO facts (volume, file_id, parent_file_id, name, is_directory, size, created_at, modified_at, attributes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 ON CONFLICT(volume, file_id) DO UPDATE SET
+                    parent_file_id = excluded.parent_file_id,
+                    name = excluded.name,
+                    is_directory = excluded.is_directory,
+                    size = excluded.size,
+                    modified_at = excluded.modified_at,
+                    attributes = excluded.attributes"
+            )?;
+            let mut visited_stmt = tx.prepare_cached(
+                "INSERT OR IGNORE INTO temp.visited_files (file_id) VALUES (?1)"
+            )?;
+            for fact in batch.iter() {
+                let created_str = fact.created_at.to_rfc3339();
+                let modified_str = fact.modified_at.to_rfc3339();
+                stmt.execute(rusqlite::params![
+                    fact.volume,
+                    fact.file_id,
+                    fact.parent_file_id,
+                    fact.name,
+                    if fact.is_directory { 1 } else { 0 },
+                    fact.size,
+                    created_str,
+                    modified_str,
+                    fact.attributes,
+                ])?;
+                visited_stmt.execute(rusqlite::params![fact.file_id])?;
+            }
         }
-    }
-    tx.commit()?;
+        tx.commit()?;
+        Ok(())
+    })();
+
     batch.clear();
-    Ok(())
+    res
 }
 
 /// Performs a recursive crawler walk of the filesystem root for the given volume.
@@ -200,6 +204,9 @@ pub fn scan_volume(volume: &str) -> io::Result<()> {
                     let size = if is_dir { 0 } else { metadata.len() };
 
                     let mut attrs = 0;
+                    if !is_dir {
+                        attrs |= 32;
+                    }
                     if name.starts_with('.') {
                         attrs |= 2;
                     }
@@ -256,7 +263,7 @@ pub fn scan_volume(volume: &str) -> io::Result<()> {
     // Delete any files in facts for this volume that were NOT visited during this scan
     println!("[Scanner - {}] Purging stale facts...", volume);
     if let Err(e) = conn.execute(
-        "DELETE FROM facts WHERE volume = ?1 AND file_id NOT IN (SELECT file_id FROM temp.visited_files)",
+        "DELETE FROM facts WHERE volume = ?1 AND NOT EXISTS (SELECT 1 FROM temp.visited_files WHERE temp.visited_files.file_id = facts.file_id)",
         rusqlite::params![volume],
     ) {
         eprintln!("[Scanner - {}] DB error purging stale facts: {:?}", volume, e);

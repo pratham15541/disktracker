@@ -131,6 +131,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match &cli.command {
         Commands::Daemon { service } => {
+            #[cfg(windows)]
+            {
+                if !platform_windows::is_elevated() {
+                    print_error(
+                        cli.json,
+                        "E_NOT_ELEVATED",
+                        "DiskTracker daemon must be run with Administrator privileges.",
+                        None,
+                    );
+                    std::process::exit(1);
+                }
+            }
+
             if *service {
                 let run_server_fn = |rx| {
                     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -160,6 +173,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Init => {
+            #[cfg(windows)]
+            {
+                if !platform_windows::is_elevated() {
+                    print_error(
+                        cli.json,
+                        "E_NOT_ELEVATED",
+                        "DiskTracker must be run as Administrator/elevated terminal on Windows to watch drives.",
+                        None,
+                    );
+                    std::process::exit(1);
+                }
+            }
+
             // 1. Check if daemon is already running
             let already_running = match query_status().await {
                 Ok(resp) => {
@@ -605,6 +631,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
 
+                                if result.get("index_rebuilding").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                    println!("⚠ Search index is currently rebuilding in the background; results may be stale.");
+                                }
+
                                 if results.is_empty() {
                                     println!("No results found.");
                                     return Ok(());
@@ -700,6 +730,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if attr_strs.contains(&"readonly") { attr_flags.push('R'); }
                                     if attr_strs.contains(&"hidden") { attr_flags.push('H'); }
                                     if attr_strs.contains(&"system") { attr_flags.push('S'); }
+                                    if attr_strs.contains(&"archive") { attr_flags.push('A'); }
                                     if attr_strs.contains(&"reparse") { attr_flags.push('L'); }
                                     if attr_flags.is_empty() {
                                         attr_flags = "-".to_string();

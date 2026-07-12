@@ -45,7 +45,7 @@ pub fn get_db_connection() -> std::result::Result<Connection, Box<dyn Error>> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "cache_size", &"-64000".to_string())?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
     Ok(conn)
@@ -62,7 +62,7 @@ pub fn init_db() -> std::result::Result<PathBuf, Box<dyn Error>> {
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "cache_size", &"-64000".to_string())?;
-    conn.pragma_update(None, "foreign_keys", "ON")?;
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
     // Create mutation_log table
@@ -97,6 +97,12 @@ pub fn init_db() -> std::result::Result<PathBuf, Box<dyn Error>> {
             PRIMARY KEY (volume, file_id),
             FOREIGN KEY(volume, parent_file_id) REFERENCES facts(volume, file_id)
         )",
+        [],
+    )?;
+
+    // Create index on parent_file_id to speed up foreign key checks during deletes
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_facts_parent ON facts (volume, parent_file_id)",
         [],
     )?;
 
