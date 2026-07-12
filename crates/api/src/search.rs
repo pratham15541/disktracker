@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use rusqlite::Connection;
 use tantivy::schema::*;
 use tantivy::{Index, IndexWriter, TantivyDocument, Term, IndexReader};
-use tantivy::query::{BooleanQuery, Occur, Query, TermQuery, RangeQuery, AllQuery};
+use tantivy::query::{BooleanQuery, Occur, Query, TermQuery, RangeQuery, AllQuery, FuzzyTermQuery};
 use tantivy::schema::IndexRecordOption;
 use serde::{Deserialize, Serialize};
 
@@ -495,16 +495,42 @@ pub fn execute_search(
 
     // 1. Text Query (Name substring match or term match) with exact boost
     if !query_str.trim().is_empty() && query_str != "*" {
-        let query_parser = tantivy::query::QueryParser::for_index(&si.index, vec![si.name]);
-        if let Ok(text_query) = query_parser.parse_query(query_str) {
-            let mut text_sub_queries = vec![(Occur::Must, text_query)];
+        let words: Vec<&str> = query_str.split_whitespace().collect();
+        if words.is_empty() {
+            sub_queries.push((Occur::Must, Box::new(AllQuery)));
+        } else {
+            let mut word_queries = Vec::new();
+            let query_parser = tantivy::query::QueryParser::for_index(&si.index, vec![si.name]);
             
-            let exact_term = Term::from_field_text(si.name, &query_str.to_lowercase());
-            let exact_query = Box::new(TermQuery::new(exact_term, IndexRecordOption::Basic));
-            let boosted_exact_query = Box::new(tantivy::query::BoostQuery::new(exact_query, 5.0));
-            text_sub_queries.push((Occur::Should, boosted_exact_query));
-            
-            let combined_text_query = Box::new(BooleanQuery::new(text_sub_queries));
+            for word in words {
+                let word_lower = word.to_lowercase();
+                let mut should_clauses: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+                
+                // 1. Exact term match (highest priority, boosted to 5.0)
+                let term = Term::from_field_text(si.name, &word_lower);
+                let exact_query = Box::new(TermQuery::new(term.clone(), IndexRecordOption::Basic));
+                let boosted_exact = Box::new(tantivy::query::BoostQuery::new(exact_query, 5.0));
+                should_clauses.push((Occur::Should, boosted_exact));
+                
+                // 2. Prefix match (medium priority, e.g. "moch" matches "mocham", boosted to 1.5)
+                let prefix_term_str = format!("{}*", word_lower);
+                if let Ok(prefix_query) = query_parser.parse_query(&prefix_term_str) {
+                    let boosted_prefix = Box::new(tantivy::query::BoostQuery::new(prefix_query, 1.5));
+                    should_clauses.push((Occur::Should, boosted_prefix));
+                }
+                
+                // 3. Fuzzy match (lowest priority, edit distance 1 or 2, boosted to 0.8)
+                if word_lower.len() > 2 {
+                    let max_distance = if word_lower.len() > 5 { 2 } else { 1 };
+                    let fuzzy_query = FuzzyTermQuery::new(term, max_distance, true);
+                    let boosted_fuzzy = Box::new(tantivy::query::BoostQuery::new(Box::new(fuzzy_query), 0.8));
+                    should_clauses.push((Occur::Should, boosted_fuzzy));
+                }
+                
+                let word_combined = Box::new(BooleanQuery::new(should_clauses));
+                word_queries.push((Occur::Must, word_combined as Box<dyn Query>));
+            }
+            let combined_text_query = Box::new(BooleanQuery::new(word_queries));
             sub_queries.push((Occur::Must, combined_text_query));
         }
     } else {
