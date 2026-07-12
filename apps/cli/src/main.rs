@@ -1,4 +1,4 @@
-use api::{JsonRpcRequest, JsonRpcResponse};
+use api::{JsonRpcRequest, JsonRpcResponse, JsonRpcError};
 use clap::{Parser, Subcommand};
 use core_types::{DaemonState, ProgressSnapshot, VolumeProgress};
 use std::io::Write;
@@ -124,6 +124,11 @@ enum Commands {
         #[arg(long)]
         service: bool,
     },
+    /// Manage and diff volume snapshots
+    Snapshot {
+        #[command(subcommand)]
+        subcommand: SnapshotCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -140,17 +145,55 @@ enum ServiceCommands {
 
 #[derive(Subcommand)]
 enum ConfigCommands {
-    /// Get the value of a configuration key
+    /// Get the value of a configuration key. Examples: 'config get fuzzy', 'config get retention'
     Get {
-        /// The config key to query
+        /// The config key to query (retention, retention-days, fuzzy)
         key: String,
     },
-    /// Set the value of a configuration key
+    /// Set the value of a configuration key. Examples: 'config set fuzzy false', 'config set retention 24h', 'config set retention-days 7'
     Set {
-        /// The config key to modify
+        /// The config key to modify (retention, retention-days, fuzzy)
         key: String,
         /// The new value to assign
         value: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SnapshotCommands {
+    /// Create a new snapshot of a volume
+    Create {
+        /// Label for the snapshot (auto-generated if omitted)
+        #[arg(long)]
+        label: Option<String>,
+        /// The volume to snapshot (defaults to current drive, e.g. C:)
+        #[arg(long)]
+        volume: Option<String>,
+    },
+    /// List all snapshots in the database
+    List {
+        /// Filter snapshots by volume (e.g. C:, D:)
+        #[arg(long)]
+        volume: Option<String>,
+        /// Max number of snapshots to return
+        #[arg(long, default_value = "20")]
+        limit: usize,
+        /// Cursor for pagination
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// Diff two snapshots to see net file mutations
+    Diff {
+        /// First snapshot label or ID
+        snapshot_a: String,
+        /// Second snapshot label or ID
+        snapshot_b: String,
+        /// Filter diff results by path prefix
+        #[arg(long)]
+        path: Option<String>,
+        /// Max number of diff results to return
+        #[arg(long, default_value = "100")]
+        limit: usize,
     },
 }
 
@@ -482,7 +525,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Config { subcommand } => match subcommand {
             ConfigCommands::Get { key } => {
                 if key != "retention" && key != "retention-days" && key != "fuzzy" {
-                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days, fuzzy";
+                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days, fuzzy.\nExamples:\n  disktracker config get fuzzy\n  disktracker config get retention";
                     print_error(
                         cli.json,
                         "E_INVALID_PARAMS",
@@ -521,7 +564,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             ConfigCommands::Set { key, value } => {
                 if key != "retention" && key != "retention-days" && key != "fuzzy" {
-                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days, fuzzy";
+                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days, fuzzy.\nExamples:\n  disktracker config set fuzzy false\n  disktracker config set retention 24h\n  disktracker config set retention-days 7";
                     print_error(
                         cli.json,
                         "E_INVALID_PARAMS",
@@ -1255,9 +1298,530 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::Snapshot { subcommand } => match subcommand {
+            SnapshotCommands::Create { label, volume } => {
+                let vol_to_use = match volume {
+                    Some(v) => {
+                        let mut uppercase = v.to_uppercase();
+                        if !uppercase.ends_with(':') {
+                            uppercase.push(':');
+                        }
+                        uppercase
+                    }
+                    None => {
+                        match std::env::current_dir() {
+                            Ok(cwd) => {
+                                let path_str = cwd.to_string_lossy().to_string();
+                                if path_str.len() >= 2 && path_str.as_bytes()[1] == b':' {
+                                    path_str[0..2].to_uppercase()
+                                } else {
+                                    "C:".to_string()
+                                }
+                            }
+                            Err(_) => "C:".to_string()
+                        }
+                    }
+                };
+
+                let params = serde_json::json!({
+                    "volume": vol_to_use,
+                    "label": label,
+                });
+
+                match query_rpc("snapshot_create", params).await {
+                    Ok(resp) => {
+                        if let Some(err) = resp.error {
+                            print_cli_rpc_error(cli.json, &err);
+                            std::process::exit(1);
+                        }
+                        if let Some(result) = resp.result {
+                            let job_id = result.get("job_id").and_then(|j| j.as_str()).unwrap_or("");
+                            if !cli.json {
+                                println!("Creating snapshot for volume {} (job: {})...", vol_to_use, job_id);
+                            }
+                            
+                            // Poll job completion
+                            loop {
+                                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                                let poll_params = serde_json::json!({ "job_id": job_id });
+                                match query_rpc("job.completed", poll_params).await {
+                                    Ok(poll_resp) => {
+                                        if let Some(poll_err) = poll_resp.error {
+                                            print_cli_rpc_error(cli.json, &poll_err);
+                                            std::process::exit(1);
+                                        }
+                                        if let Some(job_val) = poll_resp.result {
+                                            let completed = job_val.get("completed").and_then(|c| c.as_bool()).unwrap_or(false);
+                                            if completed {
+                                                if let Some(job_err) = job_val.get("error").and_then(|e| e.as_str()) {
+                                                    eprintln!("Error: {}", job_err);
+                                                    std::process::exit(1);
+                                                }
+                                                if cli.json {
+                                                    println!("{}", serde_json::to_string_pretty(&job_val).unwrap());
+                                                } else {
+                                                    if let Some(res_details) = job_val.get("result") {
+                                                        let snap_id = res_details.get("id").and_then(|s| s.as_str()).unwrap_or("");
+                                                        let final_label = res_details.get("label").and_then(|l| l.as_str()).unwrap_or("");
+                                                        let seq = res_details.get("sequence_number").and_then(|s| s.as_i64()).unwrap_or(0);
+                                                        println!("Snapshot \"{}\" created successfully (id: {}, sequence: {}).", final_label, snap_id, seq);
+                                                    }
+                                                }
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Error polling job: {}", e);
+                                        std::process::exit(1);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Failed to request snapshot creation: {}", e);
+                        print_error(cli.json, "E_INVALID_PARAMS", &err_msg, None);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            SnapshotCommands::List { volume, limit, cursor } => {
+                let params = serde_json::json!({
+                    "volume": volume,
+                    "limit": limit,
+                    "cursor": cursor,
+                });
+
+                match query_rpc("snapshot_list", params).await {
+                    Ok(resp) => {
+                        if let Some(err) = resp.error {
+                            print_cli_rpc_error(cli.json, &err);
+                            std::process::exit(1);
+                        }
+                        if let Some(result) = resp.result {
+                            if cli.json {
+                                println!("{}", serde_json::to_string_pretty(&result.get("results").unwrap()).unwrap());
+                            } else {
+                                let results = result
+                                    .get("results")
+                                    .and_then(|v| v.as_array())
+                                    .cloned()
+                                    .unwrap_or_default();
+
+                                if results.is_empty() {
+                                    println!("No snapshots found.");
+                                    return Ok(());
+                                }
+
+                                let next_cursor = result.get("next_cursor").and_then(|c| c.as_str());
+                                let prev_cursor = result.get("prev_cursor").and_then(|c| c.as_str());
+
+                                let mut max_label = 5;
+                                let mut max_created = 19;
+                                let mut max_vol = 6;
+                                let mut max_age = 3;
+                                let mut max_id = 11;
+                                let mut max_seq = 8;
+                                let mut max_daemon = 7;
+                                let mut max_schema = 6;
+                                let mut max_retention = 9;
+                                let mut max_facts = 11;
+
+                                let mut relative_ages = Vec::new();
+                                let mut absolute_times = Vec::new();
+
+                                for item in &results {
+                                    let label = item.get("label").and_then(|l| l.as_str()).unwrap_or("");
+                                    let created = item.get("created_at").and_then(|c| c.as_str()).unwrap_or("");
+                                    let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
+                                    let id = item.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                                    let seq = item.get("sequence_number").and_then(|s| s.as_i64()).unwrap_or(0).to_string();
+                                    let daemon = item.get("daemon_version").and_then(|d| d.as_str()).unwrap_or("");
+                                    let schema = item.get("schema_version").and_then(|s| s.as_i64()).unwrap_or(0).to_string();
+                                    let retention = item.get("retention_setting").and_then(|r| r.as_str()).unwrap_or("");
+                                    let facts = item.get("facts_count").and_then(|f| f.as_i64()).unwrap_or(0).to_string();
+
+                                    let rel_age = format_relative_time(created);
+                                    let abs_time = format_absolute_time(created);
+
+                                    relative_ages.push(rel_age.clone());
+                                    absolute_times.push(abs_time.clone());
+
+                                    max_label = max_label.max(label.len());
+                                    max_created = max_created.max(abs_time.len());
+                                    max_vol = max_vol.max(vol.len());
+                                    max_age = max_age.max(rel_age.len());
+                                    max_id = max_id.max(id.len());
+                                    max_seq = max_seq.max(seq.len());
+                                    max_daemon = max_daemon.max(daemon.len());
+                                    max_schema = max_schema.max(schema.len());
+                                    max_retention = max_retention.max(retention.len());
+                                    max_facts = max_facts.max(facts.len());
+                                }
+
+                                if cli.verbose {
+                                    println!(
+                                        "{:<width_id$} | {:<width_label$} | {:<width_created$} | {:<width_vol$} | {:<width_age$} | {:<width_seq$} | {:<width_daemon$} | {:<width_schema$} | {:<width_retention$} | {:<width_facts$}",
+                                        "Snapshot ID", "Label", "Created", "Volume", "Age", "Seq Ref", "Daemon", "Schema", "Retention", "Facts Count",
+                                        width_id = max_id,
+                                        width_label = max_label,
+                                        width_created = max_created,
+                                        width_vol = max_vol,
+                                        width_age = max_age,
+                                        width_seq = max_seq,
+                                        width_daemon = max_daemon,
+                                        width_schema = max_schema,
+                                        width_retention = max_retention,
+                                        width_facts = max_facts
+                                    );
+                                    println!(
+                                        "{}",
+                                        "-".repeat(max_id + max_label + max_created + max_vol + max_age + max_seq + max_daemon + max_schema + max_retention + max_facts + 27)
+                                    );
+                                    for (i, item) in results.iter().enumerate() {
+                                        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                        let label = item.get("label").and_then(|v| v.as_str()).unwrap_or("");
+                                        let abs_time = &absolute_times[i];
+                                        let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
+                                        let rel_age = &relative_ages[i];
+                                        let seq = item.get("sequence_number").and_then(|s| s.as_i64()).unwrap_or(0);
+                                        let daemon = item.get("daemon_version").and_then(|v| v.as_str()).unwrap_or("");
+                                        let schema = item.get("schema_version").and_then(|s| s.as_i64()).unwrap_or(0);
+                                        let retention = item.get("retention_setting").and_then(|v| v.as_str()).unwrap_or("");
+                                        let facts = item.get("facts_count").and_then(|f| f.as_i64()).unwrap_or(0);
+
+                                        println!(
+                                            "{:<width_id$} | {:<width_label$} | {:<width_created$} | {:<width_vol$} | {:<width_age$} | {:<width_seq$} | {:<width_daemon$} | {:<width_schema$} | {:<width_retention$} | {:<width_facts$}",
+                                            id, label, abs_time, vol, rel_age, seq, daemon, schema, retention, facts,
+                                            width_id = max_id,
+                                            width_label = max_label,
+                                            width_created = max_created,
+                                            width_vol = max_vol,
+                                            width_age = max_age,
+                                            width_seq = max_seq,
+                                            width_daemon = max_daemon,
+                                            width_schema = max_schema,
+                                            width_retention = max_retention,
+                                            width_facts = max_facts
+                                        );
+                                    }
+                                } else {
+                                    println!(
+                                        "{:<width_label$} | {:<width_created$} | {:<width_vol$} | {:<width_age$}",
+                                        "Label", "Created", "Volume", "Age",
+                                        width_label = max_label,
+                                        width_created = max_created,
+                                        width_vol = max_vol,
+                                        width_age = max_age
+                                    );
+                                    println!(
+                                        "{}",
+                                        "-".repeat(max_label + max_created + max_vol + max_age + 9)
+                                    );
+                                    for (i, item) in results.iter().enumerate() {
+                                        let label = item.get("label").and_then(|v| v.as_str()).unwrap_or("");
+                                        let abs_time = &absolute_times[i];
+                                        let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
+                                        let rel_age = &relative_ages[i];
+
+                                        println!(
+                                            "{:<width_label$} | {:<width_created$} | {:<width_vol$} | {:<width_age$}",
+                                            label, abs_time, vol, rel_age,
+                                            width_label = max_label,
+                                            width_created = max_created,
+                                            width_vol = max_vol,
+                                            width_age = max_age
+                                        );
+                                    }
+                                }
+
+                                if prev_cursor.is_some() || next_cursor.is_some() {
+                                    println!();
+                                    if let Some(prev) = prev_cursor {
+                                        print!("Previous page cursor: {}    ", prev);
+                                    }
+                                    if let Some(next) = next_cursor {
+                                        print!("Next page cursor: {}", next);
+                                    }
+                                    println!();
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Failed to query snapshots list: {}", e);
+                        print_error(cli.json, "E_INVALID_PARAMS", &err_msg, None);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            SnapshotCommands::Diff { snapshot_a, snapshot_b, path, limit } => {
+                let params = serde_json::json!({
+                    "snapshot_a": snapshot_a,
+                    "snapshot_b": snapshot_b,
+                    "path_filter": path,
+                    "limit": limit,
+                });
+
+                match query_rpc("snapshot_diff", params).await {
+                    Ok(resp) => {
+                        if let Some(err) = resp.error {
+                            print_cli_rpc_error(cli.json, &err);
+                            std::process::exit(1);
+                        }
+                        if let Some(result) = resp.result {
+                            if cli.json {
+                                println!("{}", serde_json::to_string_pretty(&result.get("results").unwrap()).unwrap());
+                            } else {
+                                let results = result
+                                    .get("results")
+                                    .and_then(|v| v.as_array())
+                                    .cloned()
+                                    .unwrap_or_default();
+
+                                if results.is_empty() {
+                                    println!("No changes found between snapshots.");
+                                    return Ok(());
+                                }
+
+                                let mut max_kind = 8;
+                                let mut max_size = 10;
+                                let mut max_path = 4;
+                                let mut max_fid = 7;
+                                let mut max_pid = 9;
+
+                                let mut size_deltas = Vec::new();
+                                for item in &results {
+                                    let kind = item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                                    let size_val = item.get("size_delta").and_then(|s| s.as_i64()).unwrap_or(0);
+                                    let path_str = item.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                                    let fid = item.get("file_id").and_then(|f| f.as_u64()).unwrap_or(0).to_string();
+                                    let pid = item.get("parent_file_id").and_then(|p| p.as_u64()).unwrap_or(0).to_string();
+
+                                    let size_str = format_size_delta(size_val);
+                                    size_deltas.push(size_str.clone());
+
+                                    max_kind = max_kind.max(kind.len());
+                                    max_size = max_size.max(size_str.len());
+                                    
+                                    // Handle renaming path presentation length
+                                    let mut display_path = path_str.to_string();
+                                    if kind.eq_ignore_ascii_case("renamed") {
+                                        if let Some(old) = item.get("old_name").and_then(|o| o.as_str()) {
+                                            display_path = format!("{} (Renamed from {})", path_str, old);
+                                        }
+                                    }
+                                    max_path = max_path.max(display_path.len());
+                                    max_fid = max_fid.max(fid.len());
+                                    max_pid = max_pid.max(pid.len());
+                                }
+
+                                if cli.verbose {
+                                    println!(
+                                        "{:<width_fid$} | {:<width_pid$} | {:<width_kind$} | {:>width_size$} | Path / Details",
+                                        "File ID", "Parent ID", "Kind", "Size Delta",
+                                        width_fid = max_fid,
+                                        width_pid = max_pid,
+                                        width_kind = max_kind,
+                                        width_size = max_size
+                                    );
+                                    println!(
+                                        "{}",
+                                        "-".repeat(max_fid + max_pid + max_kind + max_size + max_path + 15)
+                                    );
+                                    for (i, item) in results.iter().enumerate() {
+                                        let fid = item.get("file_id").and_then(|f| f.as_u64()).unwrap_or(0);
+                                        let pid = item.get("parent_file_id").and_then(|p| p.as_u64()).unwrap_or(0);
+                                        let kind = item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                                        let size_str = &size_deltas[i];
+                                        let path_str = item.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                                        let mut display_path = path_str.to_string();
+                                        if kind.eq_ignore_ascii_case("renamed") {
+                                            if let Some(old) = item.get("old_name").and_then(|o| o.as_str()) {
+                                                display_path = format!("{} (Renamed from {})", path_str, old);
+                                            }
+                                        }
+
+                                        println!(
+                                            "{:<width_fid$} | {:<width_pid$} | {:<width_kind$} | {:>width_size$} | {}",
+                                            fid, pid, kind, size_str, display_path,
+                                            width_fid = max_fid,
+                                            width_pid = max_pid,
+                                            width_kind = max_kind,
+                                            width_size = max_size
+                                        );
+                                    }
+                                } else {
+                                    // Tree node structure for colorized diff tree
+                                    struct DiffTreeNode {
+                                        name: String,
+                                        kind: String,
+                                        size_delta: i64,
+                                        old_name: Option<String>,
+                                        is_directory: bool,
+                                        children: std::collections::BTreeMap<String, DiffTreeNode>,
+                                    }
+
+                                    impl DiffTreeNode {
+                                        fn new(name: &str) -> Self {
+                                            Self {
+                                                name: name.to_string(),
+                                                kind: String::new(),
+                                                size_delta: 0,
+                                                old_name: None,
+                                                is_directory: false,
+                                                children: std::collections::BTreeMap::new(),
+                                            }
+                                        }
+                                    }
+
+                                    fn print_diff_tree_node(
+                                        node: &DiffTreeNode,
+                                        prefix: &str,
+                                        is_last: bool,
+                                        is_root: bool,
+                                    ) {
+                                        let mut tree_line = String::new();
+
+                                        if is_root {
+                                            tree_line.push_str(&format!("{}\\", node.name));
+                                        } else {
+                                            tree_line.push_str(prefix);
+                                            if is_last {
+                                                tree_line.push_str("└── ");
+                                            } else {
+                                                tree_line.push_str("├── ");
+                                            }
+
+                                            let formatted_delta = format_size_delta(node.size_delta);
+                                            match node.kind.as_str() {
+                                                "Created" => {
+                                                    tree_line.push_str(&format!(
+                                                        "\x1b[32m+ {} ({})\x1b[0m",
+                                                        node.name, formatted_delta
+                                                    ));
+                                                }
+                                                "Deleted" => {
+                                                    tree_line.push_str(&format!(
+                                                        "\x1b[31m- {} ({})\x1b[0m",
+                                                        node.name, formatted_delta
+                                                    ));
+                                                }
+                                                "Renamed" => {
+                                                    let old = node.old_name.as_deref().unwrap_or("unknown");
+                                                    tree_line.push_str(&format!(
+                                                        "\x1b[33m~ {} (Renamed from {}, {})\x1b[0m",
+                                                        node.name, old, formatted_delta
+                                                    ));
+                                                }
+                                                "Modified" => {
+                                                    tree_line.push_str(&format!(
+                                                        "\x1b[36m~ {} ({})\x1b[0m",
+                                                        node.name, formatted_delta
+                                                    ));
+                                                }
+                                                _ => {
+                                                    let display_name = if node.is_directory {
+                                                        format!("{}/", node.name)
+                                                    } else {
+                                                        node.name.clone()
+                                                    };
+                                                    tree_line.push_str(&display_name);
+                                                }
+                                            }
+                                        }
+
+                                        println!("{}", tree_line);
+
+                                        let child_count = node.children.len();
+                                        let mut i = 0;
+                                        for (_, child) in &node.children {
+                                            i += 1;
+                                            let is_last_child = i == child_count;
+                                            let new_prefix = if is_root {
+                                                "".to_string()
+                                            } else {
+                                                format!(
+                                                    "{}{}",
+                                                    prefix,
+                                                    if is_last { "    " } else { "│   " }
+                                                )
+                                            };
+                                            print_diff_tree_node(child, &new_prefix, is_last_child, false);
+                                        }
+                                    }
+
+                                    let mut roots: std::collections::BTreeMap<String, DiffTreeNode> =
+                                        std::collections::BTreeMap::new();
+
+                                    for item in &results {
+                                        let kind = item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                                        let size_val = item.get("size_delta").and_then(|s| s.as_i64()).unwrap_or(0);
+                                        let path_str = item.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                                        let is_dir = item.get("is_directory").and_then(|v| v.as_bool()).unwrap_or(false);
+                                        let old_name = item.get("old_name").and_then(|o| o.as_str().map(|s| s.to_string()));
+
+                                        let segments: Vec<&str> = path_str.split('/').filter(|s| !s.is_empty()).collect();
+                                        if !segments.is_empty() {
+                                            let vol = segments[0];
+                                            let mut curr = roots.entry(vol.to_string()).or_insert_with(|| {
+                                                let mut r = DiffTreeNode::new(vol);
+                                                r.is_directory = true;
+                                                r
+                                            });
+
+                                            for i in 1..segments.len() {
+                                                let segment = segments[i];
+                                                let is_leaf = i == segments.len() - 1;
+                                                curr = curr
+                                                    .children
+                                                    .entry(segment.to_string())
+                                                    .or_insert_with(|| {
+                                                        let mut n = DiffTreeNode::new(segment);
+                                                        if !is_leaf {
+                                                            n.is_directory = true;
+                                                        }
+                                                        n
+                                                    });
+                                            }
+
+                                            // Apply leaf properties
+                                            curr.kind = kind.to_string();
+                                            curr.size_delta = size_val;
+                                            curr.old_name = old_name;
+                                            curr.is_directory = is_dir;
+                                        }
+                                    }
+
+                                    for (_, root_node) in &roots {
+                                        print_diff_tree_node(root_node, "", false, true);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Failed to request snapshot diff: {}", e);
+                        print_error(cli.json, "E_INVALID_PARAMS", &err_msg, None);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
+}
+
+fn print_cli_rpc_error(json_mode: bool, err: &JsonRpcError) {
+    let mut code_str = "E_UNKNOWN";
+    if let Some(ref data) = err.data {
+        if let Some(c) = data.get("code").and_then(|v| v.as_str()) {
+            code_str = c;
+        }
+    }
+    print_error(json_mode, code_str, &err.message, err.data.clone());
 }
 
 async fn query_rpc(

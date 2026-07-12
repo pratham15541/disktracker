@@ -1,6 +1,7 @@
 mod drain;
 pub mod search;
 pub mod history;
+pub mod snapshots;
 use tantivy::schema::Value;
 
 use core_types::{
@@ -516,10 +517,11 @@ async fn handle_request(
                             format!("Failed to save config: {}", e),
                         );
                     }
+                    tokio::spawn(run_pruning_cycle());
                     let res = serde_json::json!({
                         "key": key,
                         "value": val_str,
-                        "message": "Note: this change will take effect on the next scheduled run, not immediately."
+                        "message": "Retention setting updated. Pruning cycle triggered immediately."
                     });
                     JsonRpcResponse::success(req.id, res)
                 }
@@ -764,6 +766,18 @@ async fn handle_request(
                 Err(e) => JsonRpcResponse::error(req.id, -32603, e),
             }
         }
+        "snapshot_create" => {
+            map_rpc_result(req.id, snapshots::handle_snapshot_create(req.params))
+        }
+        "job.completed" => {
+            map_rpc_result(req.id, snapshots::handle_job_completed(req.params))
+        }
+        "snapshot_list" => {
+            map_rpc_result(req.id, snapshots::handle_snapshot_list(req.params))
+        }
+        "snapshot_diff" => {
+            map_rpc_result(req.id, snapshots::handle_snapshot_diff(req.params))
+        }
         "get_search_rebuild_status" => {
             let in_progress = search::REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst);
             let progress = search::REBUILD_PROGRESS_COUNT.load(std::sync::atomic::Ordering::SeqCst);
@@ -790,4 +804,42 @@ fn get_last_successful_pruning_time() -> Option<chrono::DateTime<chrono::Utc>> {
         }
     }
     None
+}
+
+fn map_rpc_result(id: Option<serde_json::Value>, res: Result<serde_json::Value, String>) -> JsonRpcResponse {
+    match res {
+        Ok(val) => JsonRpcResponse::success(id, val),
+        Err(err) => {
+            if err.starts_with("E_INVALID_PARAMS: ") {
+                let msg = err.trim_start_matches("E_INVALID_PARAMS: ");
+                JsonRpcResponse::error_with_data(
+                    id,
+                    -32602,
+                    msg.to_string(),
+                    Some(serde_json::json!({ "code": "E_INVALID_PARAMS" }))
+                )
+            } else if err.starts_with("E_NOT_FOUND: ") {
+                let msg = err.trim_start_matches("E_NOT_FOUND: ");
+                JsonRpcResponse::error_with_data(
+                    id,
+                    -32002,
+                    msg.to_string(),
+                    Some(serde_json::json!({ "code": "E_NOT_FOUND" }))
+                )
+            } else if err.starts_with("E_SNAPSHOT_DATA_EXPIRED: ") {
+                let msg = err.trim_start_matches("E_SNAPSHOT_DATA_EXPIRED: ");
+                JsonRpcResponse::error_with_data(
+                    id,
+                    -32003,
+                    msg.to_string(),
+                    Some(serde_json::json!({
+                        "code": "E_SNAPSHOT_DATA_EXPIRED",
+                        "retention": config_mgr::load_config().retention
+                    }))
+                )
+            } else {
+                JsonRpcResponse::error(id, -32603, err)
+            }
+        }
+    }
 }
