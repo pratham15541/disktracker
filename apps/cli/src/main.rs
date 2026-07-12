@@ -545,8 +545,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let val = result
                                     .get("value")
                                     .and_then(|v| v.as_str())
-                                    .unwrap_or("30d");
-                                println!("Set {} to {}. Note: this change will take effect on the next scheduled run, not immediately.", key, val);
+                                    .unwrap_or("");
+                                let msg = result
+                                    .get("message")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if !msg.is_empty() {
+                                    println!("Set {} to {}. {}", key, val, msg);
+                                } else {
+                                    println!("Set {} to {}.", key, val);
+                                }
                             }
                         }
                     }
