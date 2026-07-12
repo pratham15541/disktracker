@@ -811,22 +811,25 @@ pub fn execute_search(
             }
 
             // Tier 5 — fuzzy per word (edit distance scales with word length)
-            // Only applied to words longer than 2 chars to avoid false positives.
-            let fuzzy_clauses: Vec<(Occur, Box<dyn Query>)> = words
-                .iter()
-                .filter(|w| w.len() > 2)
-                .map(|w| {
-                    let term = Term::from_field_text(si.name, w);
-                    let max_dist = if w.len() > 5 { 2u8 } else { 1u8 };
-                    let fq = FuzzyTermQuery::new(term, max_dist, true);
-                    let boosted: Box<dyn Query> =
-                        Box::new(tantivy::query::BoostQuery::new(Box::new(fq), 0.8));
-                    (Occur::Must, boosted)
-                })
-                .collect();
-            if !fuzzy_clauses.is_empty() {
-                let fuzzy_and = Box::new(BooleanQuery::new(fuzzy_clauses));
-                tiers.push((Occur::Should, fuzzy_and as Box<dyn Query>));
+            // Only applied if fuzzy is enabled in config and to words longer than 2 chars to avoid false positives.
+            let config = config_mgr::load_config();
+            if config.fuzzy {
+                let fuzzy_clauses: Vec<(Occur, Box<dyn Query>)> = words
+                    .iter()
+                    .filter(|w| w.len() > 2)
+                    .map(|w| {
+                        let term = Term::from_field_text(si.name, w);
+                        let max_dist = if w.len() > 5 { 2u8 } else { 1u8 };
+                        let fq = FuzzyTermQuery::new(term, max_dist, true);
+                        let boosted: Box<dyn Query> =
+                            Box::new(tantivy::query::BoostQuery::new(Box::new(fq), 0.8));
+                        (Occur::Must, boosted)
+                    })
+                    .collect();
+                if !fuzzy_clauses.is_empty() {
+                    let fuzzy_and = Box::new(BooleanQuery::new(fuzzy_clauses));
+                    tiers.push((Occur::Should, fuzzy_and as Box<dyn Query>));
+                }
             }
 
             // The outer Must ensures at least one tier matches (any hit qualifies).

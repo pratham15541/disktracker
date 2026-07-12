@@ -44,7 +44,7 @@ correlation work belongs to a later epoch and is not tracked in this table.
 |---|---|---|---|---|
 | 7 — Retention, pruning & config | Completed | yes | Antigravity | 2026-07-11 |
 | 8 — Search | Completed | yes | Antigravity | 2026-07-11 |
-| 9 — History | Not started | — | — | — |
+| 9 — History | Completed | yes | Antigravity | 2026-07-12 |
 | 10 — Snapshots (incl. `snapshot list`) | Not started | — | — | — |
 | 11 — Top | Not started | — | — | — |
 | 12 — Windows Service auto-start & management | Completed | yes | Antigravity | 2026-07-11 |
@@ -238,3 +238,20 @@ _(one entry per session — append, don't overwrite)_
 ### 2026-07-11 — Epoch 2 Loop 8: Volume Handle Caching & CPU Optimization — Model: Antigravity
 - What was done: Fixed a massive CPU bottleneck in the Drain Engine's replay loop by implementing a thread-safe static volume handle cache (`VOLUME_HANDLES`). This caches the open `CreateFileW` drive handles (`\\.\C:`, etc.) for the lifetime of the daemon, speeding up `OpenFileById` queries by up to 100x and reducing CPU usage to ~0%.
 - What was verified on Windows: Successfully cross-compiled release target and validated build.
+
+### 2026-07-12 — Epoch 2 Loop 8: Concurrency & Substring Search Optimizations — Model: Antigravity
+- What was done: Fixed Named Pipe `ERROR_PIPE_BUSY` by resolving Tokio thread pool starvation; refactored the index rebuild task to release the writer lock and yield every 5,000 files. Added client backoff retries of 10s.
+- What was done: Fixed prefix and substring search matching. Replaced broken QueryParser prefix match with native `RegexQuery`, and implemented manual n-gram parsing for the `name_ngram` field to enable infix substring search (LIKE `%word%`) down to 2 characters.
+- What was verified on Windows: Manually verified by the user to be perfectly functional.
+
+### 2026-07-12 — Epoch 2 Loop 9: History Implementation — Model: Antigravity
+- What was done: Implemented the `get_history` JSON-RPC method. Built path-to-id resolution that walks the current `facts` table and falls back to verifying candidate parent chains in `mutation_log` to support deleted files.
+- What was done: Implemented server-side history collapsing for consecutive same-kind events, retention-based truncation detection, and pagination cursor support.
+- What was done: Implemented `disktracker history <path>` CLI command with options for since/until, kind filtering, collapsing, json/verbose, and dynamic column formatting.
+- What was done: Added directory history (listing mutations of files inside the folder) and defaulted the CLI path to the current working directory.
+- What was done: Added bidirectional cursor pagination support via `f:<seq>` and `b:<seq>` tokens and overfetching.
+- What was done: Implemented live `size_delta` calculation and logging inside the Drain Engine replay loop by comparing new size to the previous size in facts.
+- What was done: Resolved laptop shutdown pruning failures by querying the `pruning_log` database and triggering pruning immediately on startup if the last successful run was >= 24 hours ago.
+- What was done: Added absolute path parsing to Search `--path` filter to extract volume and relative path prefix automatically.
+- What was done: Added a configurable `fuzzy` setting (default `true`) allowing users to toggle Tier 5 fuzzy term queries on or off via config.
+- What was verified on Windows: Manually verified by the user to be fully functional on Windows.

@@ -1,5 +1,7 @@
 mod drain;
 pub mod search;
+pub mod history;
+pub mod snapshots;
 use tantivy::schema::Value;
 
 use core_types::{
@@ -223,8 +225,6 @@ pub async fn run_server(
     // Spawn pruning background task
     let (pruning_shutdown_tx, mut pruning_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        use chrono::{Datelike, Timelike};
-        let mut last_run_day = None;
         let mut last_test_run = std::time::Instant::now();
 
         loop {
@@ -240,17 +240,57 @@ pub async fn run_server(
                             run_pruning_cycle().await;
                         }
                     } else {
-                        let local_now = chrono::Local::now();
-                        if local_now.hour() == 3 && local_now.minute() == 0 {
-                            let day = local_now.day();
-                            if last_run_day != Some(day) {
-                                last_run_day = Some(day);
-                                run_pruning_cycle().await;
+                        let should_run = match get_last_successful_pruning_time() {
+                            Some(last_run) => {
+                                let elapsed = chrono::Utc::now().signed_duration_since(last_run);
+                                elapsed >= chrono::Duration::hours(24)
                             }
+                            None => true, // Never run successfully, run now
+                        };
+                        if should_run {
+                            run_pruning_cycle().await;
                         }
                     }
                 }
                 _ = &mut pruning_shutdown_rx => {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Spawn auto-snapshot background task
+    let (_auto_snap_shutdown_tx, mut auto_snap_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
+                    let config = config_mgr::load_config();
+                    if config.auto_snapshot {
+                        let dur = match config_mgr::parse_any_duration(&config.auto_snapshot_interval) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                eprintln!("[Auto-Snapshot] Invalid interval '{}': {}. Defaulting to 24h.", config.auto_snapshot_interval, e);
+                                chrono::Duration::hours(24)
+                            }
+                        };
+
+                        let should_run = match snapshots::get_last_auto_snapshot_time() {
+                            Some(last_time) => {
+                                let elapsed = chrono::Utc::now().signed_duration_since(last_time);
+                                elapsed >= dur
+                            }
+                            None => true, // Never run successfully, run now immediately
+                        };
+
+                        if should_run {
+                            if let Err(e) = snapshots::trigger_auto_snapshot_for_all_volumes() {
+                                eprintln!("[Auto-Snapshot] Error during auto-snapshot: {}", e);
+                            }
+                        }
+                    }
+                }
+                _ = &mut auto_snap_shutdown_rx => {
                     break;
                 }
             }
@@ -440,17 +480,23 @@ async fn handle_request(
         }
         "config_get" => {
             let key = req.params.get("key").and_then(|k| k.as_str()).unwrap_or("");
-            if key != "retention" && key != "retention-days" {
+            if key != "retention" && key != "retention-days" && key != "fuzzy" && key != "auto-snapshot" && key != "auto-snapshot-interval" {
                 return JsonRpcResponse::error(
                     req.id,
                     -32602,
-                    "Invalid config key. Valid keys are: retention, retention-days".to_string(),
+                    "Invalid config key. Valid keys are: retention, retention-days, fuzzy, auto-snapshot, auto-snapshot-interval".to_string(),
                 );
             }
             let config = config_mgr::load_config();
+            let value = match key {
+                "fuzzy" => config.fuzzy.to_string(),
+                "auto-snapshot" => config.auto_snapshot.to_string(),
+                "auto-snapshot-interval" => config.auto_snapshot_interval.clone(),
+                _ => config.retention.clone()
+            };
             let res = serde_json::json!({
                 "key": key,
-                "value": config.retention
+                "value": value
             });
             JsonRpcResponse::success(req.id, res)
         }
@@ -461,13 +507,97 @@ async fn handle_request(
                 .get("value")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if key != "retention" && key != "retention-days" {
+            if key != "retention" && key != "retention-days" && key != "fuzzy" && key != "auto-snapshot" && key != "auto-snapshot-interval" {
                 return JsonRpcResponse::error(
                     req.id,
                     -32602,
-                    "Invalid config key. Valid keys are: retention, retention-days".to_string(),
+                    "Invalid config key. Valid keys are: retention, retention-days, fuzzy, auto-snapshot, auto-snapshot-interval".to_string(),
                 );
             }
+
+            if key == "fuzzy" {
+                let parsed_bool = match val_str.trim().to_lowercase().as_str() {
+                    "true" | "on" | "1" | "yes" => true,
+                    "false" | "off" | "0" | "no" => false,
+                    _ => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            "Invalid boolean value. Acceptable values: true, false, on, off".to_string(),
+                        );
+                    }
+                };
+
+                let mut config = config_mgr::load_config();
+                config.fuzzy = parsed_bool;
+                if let Err(e) = config_mgr::save_config(&config) {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32603,
+                        format!("Failed to save config: {}", e),
+                    );
+                }
+                let res = serde_json::json!({
+                    "key": key,
+                    "value": parsed_bool.to_string(),
+                    "message": "Fuzzy search setting updated."
+                });
+                return JsonRpcResponse::success(req.id, res);
+            }
+
+            if key == "auto-snapshot" {
+                let parsed_bool = match val_str.trim().to_lowercase().as_str() {
+                    "true" | "on" | "1" | "yes" => true,
+                    "false" | "off" | "0" | "no" => false,
+                    _ => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            "Invalid boolean value. Acceptable values: true, false, on, off".to_string(),
+                        );
+                    }
+                };
+
+                let mut config = config_mgr::load_config();
+                config.auto_snapshot = parsed_bool;
+                if let Err(e) = config_mgr::save_config(&config) {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32603,
+                        format!("Failed to save config: {}", e),
+                    );
+                }
+                let res = serde_json::json!({
+                    "key": key,
+                    "value": parsed_bool.to_string(),
+                    "message": "Auto-snapshot setting updated."
+                });
+                return JsonRpcResponse::success(req.id, res);
+            }
+
+            if key == "auto-snapshot-interval" {
+                match config_mgr::parse_any_duration(val_str) {
+                    Ok(_) => {
+                        let mut config = config_mgr::load_config();
+                        config.auto_snapshot_interval = val_str.to_string();
+                        if let Err(e) = config_mgr::save_config(&config) {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32603,
+                                format!("Failed to save config: {}", e),
+                            );
+                        }
+                        let res = serde_json::json!({
+                            "key": key,
+                            "value": val_str,
+                            "message": "Auto-snapshot interval updated."
+                        });
+                        return JsonRpcResponse::success(req.id, res);
+                    }
+                    Err(e) => return JsonRpcResponse::error(req.id, -32602, e),
+                }
+            }
+
             match config_mgr::parse_duration(val_str) {
                 Ok(_) => {
                     let mut config = config_mgr::load_config();
@@ -479,10 +609,11 @@ async fn handle_request(
                             format!("Failed to save config: {}", e),
                         );
                     }
+                    tokio::spawn(run_pruning_cycle());
                     let res = serde_json::json!({
                         "key": key,
                         "value": val_str,
-                        "message": "Note: this change will take effect on the next scheduled run, not immediately."
+                        "message": "Retention setting updated. Pruning cycle triggered immediately."
                     });
                     JsonRpcResponse::success(req.id, res)
                 }
@@ -531,6 +662,57 @@ async fn handle_request(
                 -32603,
                 format!("Failed to connect to database: {}", e),
             ),
+        },
+        "get_history" => {
+            let path = match req.params.get("path").and_then(|p| p.as_str()) {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error_with_data(
+                        req.id,
+                        -32602,
+                        "Path is required".to_string(),
+                        Some(serde_json::json!({
+                            "code": "E_INVALID_PARAMS"
+                        }))
+                    );
+                }
+            };
+            let since = req.params.get("since").and_then(|t| t.as_i64());
+            let until = req.params.get("until").and_then(|t| t.as_i64());
+            let kind = req.params.get("kind").and_then(|k| k.as_str());
+            let collapse = req.params.get("collapse").and_then(|c| c.as_bool()).unwrap_or(false);
+            let limit = req.params.get("limit").and_then(|l| l.as_u64()).unwrap_or(100) as usize;
+            let cursor = req.params.get("cursor").and_then(|c| c.as_str());
+
+            match storage::get_db_connection() {
+                Ok(conn) => {
+                    match history::get_history(&conn, path, since, until, kind, collapse, limit, cursor) {
+                        Ok(resp) => {
+                            JsonRpcResponse::success(req.id, serde_json::json!(resp))
+                        }
+                        Err(e) => {
+                            if e.contains("not found") || e.contains("component") {
+                                JsonRpcResponse::error_with_data(
+                                    req.id,
+                                    -32002,
+                                    format!("Couldn't find \"{}\". Check the path and try again.", path),
+                                    Some(serde_json::json!({
+                                        "code": "E_NOT_FOUND",
+                                        "input": path
+                                    }))
+                                )
+                            } else {
+                                JsonRpcResponse::error(req.id, -32603, e)
+                            }
+                        }
+                    }
+                }
+                Err(e) => JsonRpcResponse::error(
+                    req.id,
+                    -32603,
+                    format!("Failed to connect to database: {}", e),
+                ),
+            }
         },
         "search_query" => {
             if search::REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst) {
@@ -676,6 +858,18 @@ async fn handle_request(
                 Err(e) => JsonRpcResponse::error(req.id, -32603, e),
             }
         }
+        "snapshot_create" => {
+            map_rpc_result(req.id, snapshots::handle_snapshot_create(req.params))
+        }
+        "job.completed" => {
+            map_rpc_result(req.id, snapshots::handle_job_completed(req.params))
+        }
+        "snapshot_list" => {
+            map_rpc_result(req.id, snapshots::handle_snapshot_list(req.params))
+        }
+        "snapshot_diff" => {
+            map_rpc_result(req.id, snapshots::handle_snapshot_diff(req.params))
+        }
         "get_search_rebuild_status" => {
             let in_progress = search::REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst);
             let progress = search::REBUILD_PROGRESS_COUNT.load(std::sync::atomic::Ordering::SeqCst);
@@ -688,5 +882,56 @@ async fn handle_request(
             )
         }
         _ => JsonRpcResponse::error(req.id, -32601, format!("Method not found: {}", req.method)),
+    }
+}
+
+fn get_last_successful_pruning_time() -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(runs) = storage::get_latest_pruning_runs() {
+        for run in runs {
+            if run.status == "SUCCESS" {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&run.run_at) {
+                    return Some(dt.with_timezone(&chrono::Utc));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn map_rpc_result(id: Option<serde_json::Value>, res: Result<serde_json::Value, String>) -> JsonRpcResponse {
+    match res {
+        Ok(val) => JsonRpcResponse::success(id, val),
+        Err(err) => {
+            if err.starts_with("E_INVALID_PARAMS: ") {
+                let msg = err.trim_start_matches("E_INVALID_PARAMS: ");
+                JsonRpcResponse::error_with_data(
+                    id,
+                    -32602,
+                    msg.to_string(),
+                    Some(serde_json::json!({ "code": "E_INVALID_PARAMS" }))
+                )
+            } else if err.starts_with("E_NOT_FOUND: ") {
+                let msg = err.trim_start_matches("E_NOT_FOUND: ");
+                JsonRpcResponse::error_with_data(
+                    id,
+                    -32002,
+                    msg.to_string(),
+                    Some(serde_json::json!({ "code": "E_NOT_FOUND" }))
+                )
+            } else if err.starts_with("E_SNAPSHOT_DATA_EXPIRED: ") {
+                let msg = err.trim_start_matches("E_SNAPSHOT_DATA_EXPIRED: ");
+                JsonRpcResponse::error_with_data(
+                    id,
+                    -32003,
+                    msg.to_string(),
+                    Some(serde_json::json!({
+                        "code": "E_SNAPSHOT_DATA_EXPIRED",
+                        "retention": config_mgr::load_config().retention
+                    }))
+                )
+            } else {
+                JsonRpcResponse::error(id, -32603, err)
+            }
+        }
     }
 }

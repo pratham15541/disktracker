@@ -170,9 +170,25 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
             "UPDATE facts SET name = ?3, parent_file_id = ?4 WHERE volume = ?1 AND file_id = ?2",
         )?;
 
+        let mut get_previous_size_stmt = tx.prepare_cached(
+            "SELECT size FROM facts WHERE volume = ?1 AND file_id = ?2"
+        )?;
+
+        let mut update_size_delta_stmt = tx.prepare_cached(
+            "UPDATE mutation_log SET size_delta = ?1 WHERE sequence = ?2"
+        )?;
+
         for m in &mutations {
             match m.kind.as_str() {
                 "Created" | "Modified" => {
+                    let previous_size: u64 = if !m.is_directory {
+                        get_previous_size_stmt
+                            .query_row(rusqlite::params![volume, m.file_id], |row| row.get(0))
+                            .unwrap_or(0u64)
+                    } else {
+                        0
+                    };
+
                     // UPSERT fact
                     let mut size = if m.is_directory {
                         0
@@ -188,6 +204,15 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
                         }
                         attributes = real_attrs;
                     }
+
+                    let computed_delta = if m.is_directory {
+                        0
+                    } else {
+                        size as i64 - previous_size as i64
+                    };
+
+                    let _ = update_size_delta_stmt.execute(rusqlite::params![computed_delta, m.sequence]);
+
                     if let Err(e) = insert_fact_stmt.execute(rusqlite::params![
                         volume,
                         m.file_id,
@@ -206,6 +231,17 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
                     }
                 }
                 "Deleted" => {
+                    let previous_size: u64 = if !m.is_directory {
+                        get_previous_size_stmt
+                            .query_row(rusqlite::params![volume, m.file_id], |row| row.get(0))
+                            .unwrap_or(0u64)
+                    } else {
+                        0
+                    };
+
+                    let computed_delta = -(previous_size as i64);
+                    let _ = update_size_delta_stmt.execute(rusqlite::params![computed_delta, m.sequence]);
+
                     if let Err(e) = delete_fact_stmt.execute(rusqlite::params![volume, m.file_id]) {
                         eprintln!(
                             "[DrainEngine - {}] DB error deleting fact {}: {:?}",
