@@ -1,4 +1,6 @@
 mod drain;
+pub mod search;
+use tantivy::schema::Value;
 
 use core_types::{
     DaemonState, DrainProgress, ProgressSnapshot, ScannerProgress, VolumeProgress, WatcherProgress,
@@ -58,10 +60,75 @@ impl JsonRpcResponse {
             id,
         }
     }
+
+    pub fn error_with_data(id: Option<serde_json::Value>, code: i32, message: String, data: Option<serde_json::Value>) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message,
+                data,
+            }),
+            id,
+        }
+    }
+}
+
+async fn run_pruning_cycle() {
+    let config = config_mgr::load_config();
+    let duration = match config_mgr::parse_duration(&config.retention) {
+        Ok(dur) => dur,
+        Err(e) => {
+            eprintln!("[Pruning] Failed to parse retention duration: {}. Defaulting to 30 days.", e);
+            chrono::Duration::days(30)
+        }
+    };
+    let cutoff = chrono::Utc::now() - duration;
+    let cutoff_str = cutoff.to_rfc3339();
+
+    let volumes = core_types::get_registered_volumes();
+    for vol in volumes {
+        let tracker = core_types::get_volume_tracker(&vol);
+        let state = { *tracker.state.lock().unwrap() };
+        let replaying = tracker.replaying.load(std::sync::atomic::Ordering::Relaxed);
+
+        if state == DaemonState::Starting || state == DaemonState::BaselineScanning || state == DaemonState::Reconciling || replaying {
+            println!("[Pruning] Skip pruning for volume {} because it is mid-replay/scan", vol);
+            let _ = storage::log_pruning_run(&vol, "SKIPPED", "Volume is mid-replay or baseline scanning");
+            continue;
+        }
+
+        println!("[Pruning] Pruning volume {} with cutoff {}", vol, cutoff_str);
+        match storage::get_db_connection() {
+            Ok(conn) => {
+                match conn.execute(
+                    "DELETE FROM mutation_log WHERE volume = ?1 AND at < ?2",
+                    [&vol, &cutoff_str],
+                ) {
+                    Ok(deleted_count) => {
+                        let msg = format!("Deleted {} rows older than {}", deleted_count, cutoff_str);
+                        println!("[Pruning] Pruning successful for volume {}: {}", vol, msg);
+                        let _ = storage::log_pruning_run(&vol, "SUCCESS", &msg);
+                    }
+                    Err(e) => {
+                        let msg = format!("Database error during pruning: {:?}", e);
+                        eprintln!("[Pruning] Pruning failed for volume {}: {}", vol, msg);
+                        let _ = storage::log_pruning_run(&vol, "FAILED", &msg);
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = format!("Failed to get db connection: {:?}", e);
+                eprintln!("[Pruning] Pruning failed for volume {}: {}", vol, msg);
+                let _ = storage::log_pruning_run(&vol, "FAILED", &msg);
+            }
+        }
+    }
 }
 
 /// Start the JSON-RPC daemon server over named pipe/IPC.
-pub async fn run_server(pipe_path: &str) -> io::Result<()> {
+pub async fn run_server(pipe_path: &str, mut shutdown_rx: tokio::sync::oneshot::Receiver<()>) -> io::Result<()> {
     let db_path =
         storage::init_db().map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
     println!("[Daemon] SQLite Database initialized at {:?}", db_path);
@@ -72,6 +139,9 @@ pub async fn run_server(pipe_path: &str) -> io::Result<()> {
     // Detect NTFS volumes and spawn Scanner, Watcher, and Drain Engine
     let volumes = platform_windows::detect_ntfs_volumes();
     println!("[Daemon] Detected volumes to monitor: {:?}", volumes);
+
+    // Initialize search index and trigger rebuild once all volumes are Live
+    search::check_and_trigger_rebuild(volumes.clone());
 
     for vol in volumes {
         let vol_clone_watcher = vol.clone();
@@ -121,24 +191,72 @@ pub async fn run_server(pipe_path: &str) -> io::Result<()> {
         });
     }
 
+    // Spawn pruning background task
+    let (pruning_shutdown_tx, mut pruning_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        use chrono::{Datelike, Timelike};
+        let mut last_run_day = None;
+        let mut last_test_run = std::time::Instant::now();
+        
+        loop {
+            let test_interval_secs = std::env::var("DISKTRACKER_TEST_PRUNE_INTERVAL_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok());
+
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(10)) => {
+                    if let Some(secs) = test_interval_secs {
+                        if last_test_run.elapsed().as_secs() >= secs {
+                            last_test_run = std::time::Instant::now();
+                            run_pruning_cycle().await;
+                        }
+                    } else {
+                        let local_now = chrono::Local::now();
+                        if local_now.hour() == 3 && local_now.minute() == 0 {
+                            let day = local_now.day();
+                            if last_run_day != Some(day) {
+                                last_run_day = Some(day);
+                                run_pruning_cycle().await;
+                            }
+                        }
+                    }
+                }
+                _ = &mut pruning_shutdown_rx => {
+                    break;
+                }
+            }
+        }
+    });
+
     let mut listener = create_listener(pipe_path).await?;
     let started_at = chrono::Utc::now();
     loop {
-        match listener.accept().await {
-            Ok(stream) => {
-                let db_path_clone = db_path.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, started_at, db_path_clone).await {
-                        eprintln!("[Daemon] Error handling connection: {:?}", e);
+        tokio::select! {
+            accept_res = listener.accept() => {
+                match accept_res {
+                    Ok(stream) => {
+                        let db_path_clone = db_path.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_connection(stream, started_at, db_path_clone).await {
+                                eprintln!("[Daemon] Error handling connection: {:?}", e);
+                            }
+                        });
                     }
-                });
+                    Err(e) => {
+                        eprintln!("[Daemon] Error accepting connection: {:?}", e);
+                    }
+                }
             }
-            Err(e) => {
-                eprintln!("[Daemon] Error accepting connection: {:?}", e);
+            _ = &mut shutdown_rx => {
+                println!("[Daemon] Shutdown signal received. Stopping server.");
+                let _ = pruning_shutdown_tx.send(());
+                break;
             }
         }
     }
+    Ok(())
 }
+
 
 async fn handle_connection<S>(
     stream: S,
@@ -254,12 +372,18 @@ async fn handle_request(
                 DaemonState::BaselineScanning
             };
 
+            let last_db_modified = std::fs::metadata(&db_path)
+                .and_then(|m| m.modified())
+                .map(|t| chrono::DateTime::<chrono::Utc>::from(t))
+                .ok();
+
             let snapshot = ProgressSnapshot {
                 daemon_pid: std::process::id(),
                 db_path,
                 started_at,
                 state: aggregate_state,
                 volumes,
+                last_db_modified,
             };
 
             match serde_json::to_value(&snapshot) {
@@ -270,6 +394,187 @@ async fn handle_request(
                     format!("Internal error serializing status: {}", e),
                 ),
             }
+        }
+        "config_get" => {
+            let key = req.params.get("key").and_then(|k| k.as_str()).unwrap_or("");
+            if key != "retention" && key != "retention-days" {
+                return JsonRpcResponse::error(req.id, -32602, "Invalid config key. Valid keys are: retention, retention-days".to_string());
+            }
+            let config = config_mgr::load_config();
+            let res = serde_json::json!({
+                "key": key,
+                "value": config.retention
+            });
+            JsonRpcResponse::success(req.id, res)
+        }
+        "config_set" => {
+            let key = req.params.get("key").and_then(|k| k.as_str()).unwrap_or("");
+            let val_str = req.params.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            if key != "retention" && key != "retention-days" {
+                return JsonRpcResponse::error(req.id, -32602, "Invalid config key. Valid keys are: retention, retention-days".to_string());
+            }
+            match config_mgr::parse_duration(val_str) {
+                Ok(_) => {
+                    let mut config = config_mgr::load_config();
+                    config.retention = val_str.to_string();
+                    if let Err(e) = config_mgr::save_config(&config) {
+                        return JsonRpcResponse::error(req.id, -32603, format!("Failed to save config: {}", e));
+                    }
+                    let res = serde_json::json!({
+                        "key": key,
+                        "value": val_str,
+                        "message": "Note: this change will take effect on the next scheduled run, not immediately."
+                    });
+                    JsonRpcResponse::success(req.id, res)
+                }
+                Err(e) => JsonRpcResponse::error(req.id, -32602, e),
+            }
+        }
+        "get_pruning_logs" => {
+            match storage::get_latest_pruning_runs() {
+                Ok(runs) => {
+                    let serialized_runs = runs.iter().map(|run| {
+                        serde_json::json!({
+                            "volume": run.volume,
+                            "run_at": run.run_at,
+                            "status": run.status,
+                            "details": run.details
+                        })
+                    }).collect::<Vec<_>>();
+                    JsonRpcResponse::success(req.id, serde_json::json!(serialized_runs))
+                }
+                Err(e) => JsonRpcResponse::error(req.id, -32603, format!("Failed to query pruning logs: {}", e)),
+            }
+        }
+        "check_db_integrity" => {
+            match storage::get_db_connection() {
+                Ok(conn) => {
+                    let integrity: Result<String, rusqlite::Error> = conn.query_row("PRAGMA integrity_check", [], |row| row.get(0));
+                    match integrity {
+                        Ok(status) => {
+                            let res = serde_json::json!({ "status": status });
+                            JsonRpcResponse::success(req.id, res)
+                        }
+                        Err(e) => JsonRpcResponse::error(req.id, -32603, format!("Failed to check integrity: {}", e)),
+                    }
+                }
+                Err(e) => JsonRpcResponse::error(req.id, -32603, format!("Failed to connect to database: {}", e)),
+            }
+        }
+        "search_query" => {
+            if search::REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst) {
+                let progress = search::REBUILD_PROGRESS_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+                return JsonRpcResponse::error_with_data(
+                    req.id,
+                    -32001,
+                    "Still finishing an index update — try again in a moment.".to_string(),
+                    Some(serde_json::json!({
+                        "code": "E_SEARCH_INDEX_STALE",
+                        "progress": progress
+                    }))
+                );
+            }
+
+            let query_str = req.params.get("query").and_then(|q| q.as_str()).unwrap_or("");
+            let path_filter = req.params.get("path").and_then(|p| p.as_str());
+            let ext_filter = req.params.get("ext").and_then(|e| e.as_str());
+            let volume_filter = req.params.get("volume").and_then(|v| v.as_str());
+            let min_size = req.params.get("min_size").and_then(|s| s.as_u64());
+            let max_size = req.params.get("max_size").and_then(|s| s.as_u64());
+            let modified_after = req.params.get("modified_after").and_then(|t| t.as_i64());
+            let modified_before = req.params.get("modified_before").and_then(|t| t.as_i64());
+            let hidden_filter = req.params.get("hidden").and_then(|h| h.as_bool());
+            let system_filter = req.params.get("system").and_then(|s| s.as_bool());
+            let limit = req.params.get("limit").and_then(|l| l.as_u64()).unwrap_or(100) as usize;
+
+            match search::execute_search(
+                query_str,
+                path_filter,
+                ext_filter,
+                volume_filter,
+                min_size,
+                max_size,
+                modified_after,
+                modified_before,
+                hidden_filter,
+                system_filter,
+                limit,
+            ) {
+                Ok(raw_docs) => {
+                    // Reconcile: remove any docs no longer present in the facts table.
+                    // This catches deletions that the drain engine hasn't flushed to the
+                    // search index yet, and auto-cleans stale index entries on the fly.
+                    let docs = match storage::get_db_connection() {
+                        Ok(conn) => search::reconcile_search_results(raw_docs, &conn),
+                        Err(_) => raw_docs,
+                    };
+
+                    let si = match search::init_search_index() {
+                        Ok(s) => s,
+                        Err(e) => return JsonRpcResponse::error(req.id, -32603, e),
+                    };
+                    
+                    let mut results = Vec::new();
+                    let mut volumes_incomplete = std::collections::HashSet::new();
+
+                    let registered_volumes = core_types::get_registered_volumes();
+                    for vol in registered_volumes {
+                        let tracker = core_types::get_volume_tracker(&vol);
+                        let state = { *tracker.state.lock().unwrap() };
+                        if state != DaemonState::Live {
+                            volumes_incomplete.insert(vol);
+                        }
+                    }
+
+                    for doc in docs {
+                        let doc_name = doc.get_first(si.name).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let doc_path = doc.get_first(si.path).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let doc_ext = doc.get_first(si.ext).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let doc_volume = doc.get_first(si.volume).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let doc_size = doc.get_first(si.size).and_then(|v| v.as_u64()).unwrap_or(0);
+                        let doc_modified = doc.get_first(si.modified_at).and_then(|v| v.as_i64()).unwrap_or(0);
+                        let doc_is_dir = doc.get_first(si.is_directory).and_then(|v| v.as_u64()).unwrap_or(0) != 0;
+                        let doc_file_id = doc.get_first(si.file_id).and_then(|v| v.as_u64()).unwrap_or(0);
+                        
+                        let doc_attrs: Vec<String> = doc.get_all(si.attributes)
+                            .map(|v| v.as_str().unwrap_or("").to_string())
+                            .collect();
+
+                        results.push(serde_json::json!({
+                            "name": doc_name,
+                            "path": doc_path,
+                            "ext": doc_ext,
+                            "volume": doc_volume,
+                            "size": doc_size,
+                            "modified_at": doc_modified,
+                            "is_directory": doc_is_dir,
+                            "file_id": doc_file_id,
+                            "attributes": doc_attrs,
+                        }));
+                    }
+
+                    let last_db_modified = std::fs::metadata(&db_path)
+                        .and_then(|m| m.modified())
+                        .map(|t| chrono::DateTime::<chrono::Utc>::from(t))
+                        .ok();
+
+                    let res = serde_json::json!({
+                        "results": results,
+                        "volumes_incomplete": volumes_incomplete.into_iter().collect::<Vec<_>>(),
+                        "last_db_modified": last_db_modified,
+                    });
+                    JsonRpcResponse::success(req.id, res)
+                }
+                Err(e) => JsonRpcResponse::error(req.id, -32603, e),
+            }
+        }
+        "get_search_rebuild_status" => {
+            let in_progress = search::REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst);
+            let progress = search::REBUILD_PROGRESS_COUNT.load(std::sync::atomic::Ordering::SeqCst);
+            JsonRpcResponse::success(req.id, serde_json::json!({
+                "in_progress": in_progress,
+                "progress": progress
+            }))
         }
         _ => JsonRpcResponse::error(req.id, -32601, format!("Method not found: {}", req.method)),
     }

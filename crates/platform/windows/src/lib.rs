@@ -3,6 +3,8 @@ use std::io;
 #[cfg(windows)]
 pub struct WindowsIpcListener {
     path: String,
+    /// The next server instance that is already created and waiting for a client.
+    pending: Option<tokio::net::windows::named_pipe::NamedPipeServer>,
     is_first: bool,
 }
 
@@ -11,27 +13,41 @@ impl platform_traits::IpcListener for WindowsIpcListener {
     type Stream = tokio::net::windows::named_pipe::NamedPipeServer;
 
     async fn accept(&mut self) -> io::Result<Self::Stream> {
-        let server = tokio::net::windows::named_pipe::ServerOptions::new()
-            .first_pipe_instance(self.is_first)
-            .create(&self.path)?;
+        // Take the pre-created instance (or create the very first one).
+        let server = match self.pending.take() {
+            Some(s) => s,
+            None => tokio::net::windows::named_pipe::ServerOptions::new()
+                .first_pipe_instance(self.is_first)
+                .create(&self.path)?,
+        };
         self.is_first = false;
+
+        // Pre-create the NEXT instance immediately so new clients never get
+        // ERROR_PIPE_BUSY (231) while we are blocked waiting on this one.
+        let next = tokio::net::windows::named_pipe::ServerOptions::new()
+            .first_pipe_instance(false)
+            .create(&self.path)?;
+        self.pending = Some(next);
+
+        // Now wait for a client to connect to the current instance.
         server.connect().await?;
         Ok(server)
     }
 }
 
 #[cfg(windows)]
-pub type PlatformStream = tokio::net::windows::named_pipe::NamedPipeServer;
-#[cfg(windows)]
-pub type PlatformClientStream = tokio::net::windows::named_pipe::NamedPipeClient;
-
-#[cfg(windows)]
 pub async fn create_listener(path: &str) -> io::Result<WindowsIpcListener> {
     Ok(WindowsIpcListener {
         path: path.to_string(),
+        pending: None,
         is_first: true,
     })
 }
+
+#[cfg(windows)]
+pub type PlatformStream = tokio::net::windows::named_pipe::NamedPipeServer;
+#[cfg(windows)]
+pub type PlatformClientStream = tokio::net::windows::named_pipe::NamedPipeClient;
 
 #[cfg(windows)]
 pub async fn connect_client(path: &str) -> io::Result<PlatformClientStream> {
@@ -236,14 +252,21 @@ extern "system" {
 }
 
 #[cfg(windows)]
-pub fn get_file_size_by_id(volume: &str, file_id: u64) -> Option<u64> {
+static VOLUME_HANDLES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> = std::sync::OnceLock::new();
+
+#[cfg(windows)]
+fn get_volume_handle(volume: &str) -> Option<usize> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ID_DESCRIPTOR, FileIdType,
         FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE,
-        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS
     };
-    use windows_sys::Win32::Foundation::{HANDLE, CloseHandle, INVALID_HANDLE_VALUE};
+
+    let cache = VOLUME_HANDLES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut map = cache.lock().unwrap();
+    if let Some(&handle) = map.get(volume) {
+        return Some(handle);
+    }
 
     unsafe {
         let vol_path = format!("\\\\.\\{}", volume);
@@ -252,7 +275,7 @@ pub fn get_file_size_by_id(volume: &str, file_id: u64) -> Option<u64> {
             .chain(std::iter::once(0))
             .collect();
 
-        let vol_handle = win32::CreateFileW(
+        let handle = win32::CreateFileW(
             vol_path_w.as_ptr(),
             0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -262,10 +285,27 @@ pub fn get_file_size_by_id(volume: &str, file_id: u64) -> Option<u64> {
             0,
         );
 
-        if vol_handle == -1 {
-            return None;
+        if handle == -1 {
+            None
+        } else {
+            map.insert(volume.to_string(), handle as usize);
+            Some(handle as usize)
         }
+    }
+}
 
+#[cfg(windows)]
+pub fn get_file_info_by_id(volume: &str, file_id: u64) -> Option<(u64, u32)> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ID_DESCRIPTOR, FileIdType,
+        FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE,
+        FILE_FLAG_BACKUP_SEMANTICS, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION
+    };
+    use windows_sys::Win32::Foundation::{HANDLE, CloseHandle, INVALID_HANDLE_VALUE};
+
+    let vol_handle = get_volume_handle(volume)?;
+
+    unsafe {
         let mut desc = std::mem::zeroed::<FILE_ID_DESCRIPTOR>();
         desc.dwSize = std::mem::size_of::<FILE_ID_DESCRIPTOR>() as u32;
         desc.Type = FileIdType;
@@ -280,8 +320,6 @@ pub fn get_file_size_by_id(volume: &str, file_id: u64) -> Option<u64> {
             FILE_FLAG_BACKUP_SEMANTICS,
         );
 
-        CloseHandle(vol_handle as HANDLE);
-
         if file_handle == INVALID_HANDLE_VALUE || file_handle == 0 {
             return None;
         }
@@ -292,11 +330,22 @@ pub fn get_file_size_by_id(volume: &str, file_id: u64) -> Option<u64> {
 
         if success != 0 {
             let size = ((info.nFileSizeHigh as u64) << 32) | (info.nFileSizeLow as u64);
-            Some(size)
+            let attrs = info.dwFileAttributes;
+            Some((size, attrs))
         } else {
             None
         }
     }
+}
+
+#[cfg(windows)]
+pub fn get_file_size_by_id(volume: &str, file_id: u64) -> Option<u64> {
+    get_file_info_by_id(volume, file_id).map(|(size, _)| size)
+}
+
+#[cfg(not(windows))]
+pub fn get_file_info_by_id(_volume: &str, _file_id: u64) -> Option<(u64, u32)> {
+    None
 }
 
 #[cfg(not(windows))]
@@ -741,6 +790,7 @@ pub struct FastFileInfo {
     pub size: u64,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub modified_at: chrono::DateTime<chrono::Utc>,
+    pub attributes: u32,
 }
 
 #[cfg(windows)]
@@ -849,6 +899,7 @@ where
                         size: end_of_file,
                         created_at,
                         modified_at,
+                        attributes: file_attributes,
                     };
 
                     callback(info);
@@ -888,7 +939,7 @@ where
 
     let path_w: Vec<u16> = std::path::Path::new(root_path).as_os_str().encode_wide().chain(std::iter::once(0)).collect();
     
-    let root_file_id = unsafe {
+    let (root_file_id, root_attrs) = unsafe {
         let handle = CreateFileW(
             path_w.as_ptr(),
             FILE_READ_ATTRIBUTES,
@@ -908,7 +959,10 @@ where
         CloseHandle(handle);
 
         if success != 0 {
-            ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64)
+            (
+                ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64),
+                info.dwFileAttributes
+            )
         } else {
             return Err(io::Error::last_os_error());
         }
@@ -926,6 +980,7 @@ where
         size: 0,
         created_at: root_created,
         modified_at: root_modified,
+        attributes: root_attrs,
     });
 
     walk_dir_recursive(std::path::Path::new(root_path), root_file_id, volume, &mut callback)
@@ -942,6 +997,7 @@ pub struct FastFileInfo {
     pub size: u64,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub modified_at: chrono::DateTime<chrono::Utc>,
+    pub attributes: u32,
 }
 
 #[cfg(not(windows))]
@@ -1021,3 +1077,255 @@ pub fn kill_process_by_pid(pid: u32) -> std::io::Result<()> {
         ))
     }
 }
+
+// =========================================================================
+// Windows Service Support
+// =========================================================================
+
+#[cfg(windows)]
+static SERVER_RUNNER: std::sync::Mutex<Option<Box<dyn FnOnce(tokio::sync::oneshot::Receiver<()>) + Send>>> = std::sync::Mutex::new(None);
+
+#[cfg(windows)]
+static SHUTDOWN_TX: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>> = std::sync::Mutex::new(None);
+
+#[cfg(windows)]
+static mut SERVICE_STATUS_HANDLE: isize = 0;
+
+#[cfg(windows)]
+static mut SERVICE_STATUS: windows_sys::Win32::System::Services::SERVICE_STATUS = windows_sys::Win32::System::Services::SERVICE_STATUS {
+    dwServiceType: windows_sys::Win32::System::Services::SERVICE_WIN32_OWN_PROCESS,
+    dwCurrentState: windows_sys::Win32::System::Services::SERVICE_START_PENDING,
+    dwControlsAccepted: 0,
+    dwWin32ExitCode: 0,
+    dwServiceSpecificExitCode: 0,
+    dwCheckPoint: 0,
+    dwWaitHint: 0,
+};
+
+#[cfg(windows)]
+unsafe extern "system" fn service_ctrl_handler(
+    control: u32,
+    _event_type: u32,
+    _event_data: *mut std::ffi::c_void,
+    _context: *mut std::ffi::c_void,
+) -> u32 {
+    use windows_sys::Win32::System::Services::{
+        SERVICE_CONTROL_SHUTDOWN, SERVICE_CONTROL_STOP, SERVICE_STOP_PENDING, SetServiceStatus
+    };
+    match control {
+        SERVICE_CONTROL_STOP | SERVICE_CONTROL_SHUTDOWN => {
+            SERVICE_STATUS.dwCurrentState = SERVICE_STOP_PENDING;
+            SetServiceStatus(SERVICE_STATUS_HANDLE, std::ptr::addr_of!(SERVICE_STATUS));
+
+            if let Ok(mut guard) = SHUTDOWN_TX.lock() {
+                if let Some(tx) = guard.take() {
+                    let _ = tx.send(());
+                }
+            }
+            0
+        }
+        _ => 0,
+    }
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn service_main(_dw_argc: u32, _lpsz_argv: *mut *mut u16) {
+    use windows_sys::Win32::System::Services::{
+        RegisterServiceCtrlHandlerExW, SetServiceStatus, SERVICE_ACCEPT_SHUTDOWN,
+        SERVICE_ACCEPT_STOP, SERVICE_RUNNING, SERVICE_STOPPED
+    };
+    let service_name: Vec<u16> = "DiskTracker\0".encode_utf16().collect();
+    SERVICE_STATUS_HANDLE = RegisterServiceCtrlHandlerExW(
+        service_name.as_ptr(),
+        Some(service_ctrl_handler),
+        std::ptr::null_mut(),
+    );
+
+    if SERVICE_STATUS_HANDLE == 0 {
+        return;
+    }
+
+    SERVICE_STATUS.dwCurrentState = SERVICE_RUNNING;
+    SERVICE_STATUS.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SHUTDOWN;
+    SetServiceStatus(SERVICE_STATUS_HANDLE, std::ptr::addr_of!(SERVICE_STATUS));
+
+    let runner = if let Ok(mut guard) = SERVER_RUNNER.lock() {
+        guard.take()
+    } else {
+        None
+    };
+
+    if let Some(run_fn) = runner {
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        if let Ok(mut guard) = SHUTDOWN_TX.lock() {
+            *guard = Some(tx);
+        }
+        run_fn(rx);
+    }
+
+    SERVICE_STATUS.dwCurrentState = SERVICE_STOPPED;
+    SetServiceStatus(SERVICE_STATUS_HANDLE, std::ptr::addr_of!(SERVICE_STATUS));
+}
+
+#[cfg(windows)]
+fn run_service_dispatcher() -> std::io::Result<()> {
+    use windows_sys::Win32::System::Services::{
+        StartServiceCtrlDispatcherW, SERVICE_TABLE_ENTRYW
+    };
+    let service_name: Vec<u16> = "DiskTracker\0".encode_utf16().collect();
+    let service_table = [
+        SERVICE_TABLE_ENTRYW {
+            lpServiceName: service_name.as_ptr() as *mut u16,
+            lpServiceProc: Some(service_main),
+        },
+        SERVICE_TABLE_ENTRYW {
+            lpServiceName: std::ptr::null_mut(),
+            lpServiceProc: None,
+        },
+    ];
+
+    unsafe {
+        let success = StartServiceCtrlDispatcherW(service_table.as_ptr());
+        if success == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn run_as_service<F>(run_server: F) -> std::io::Result<()>
+where
+    F: FnOnce(tokio::sync::oneshot::Receiver<()>) + Send + 'static
+{
+    if let Ok(mut guard) = SERVER_RUNNER.lock() {
+        *guard = Some(Box::new(run_server));
+    }
+    run_service_dispatcher()
+}
+
+#[cfg(not(windows))]
+pub fn run_as_service<F>(run_server: F) -> std::io::Result<()>
+where
+    F: FnOnce(tokio::sync::oneshot::Receiver<()>) + Send + 'static
+{
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+    
+    rt.block_on(async {
+        tokio::spawn(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            let _ = tx.send(());
+        });
+        run_server(rx);
+    });
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn register_service() -> std::io::Result<()> {
+    let current_exe = std::env::current_exe()?;
+    let current_exe_str = current_exe.to_string_lossy();
+    let bin_path = format!("\"{}\" daemon --service", current_exe_str);
+    
+    let output = std::process::Command::new("sc.exe")
+        .args([
+            "create",
+            "DiskTracker",
+            "binPath=",
+            &bin_path,
+            "start=",
+            "auto",
+            "DisplayName=",
+            "DiskTracker Daemon",
+        ])
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+        let out_msg = String::from_utf8_lossy(&output.stdout).to_string();
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("sc create failed: {}\n{}", err_msg, out_msg),
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn register_service() -> std::io::Result<()> {
+    println!("[Unix Mock] Service registered.");
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn unregister_service() -> std::io::Result<()> {
+    let output = std::process::Command::new("sc.exe")
+        .args(["delete", "DiskTracker"])
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+        let out_msg = String::from_utf8_lossy(&output.stdout).to_string();
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("sc delete failed: {}\n{}", err_msg, out_msg),
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn unregister_service() -> std::io::Result<()> {
+    println!("[Unix Mock] Service unregistered.");
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn start_service() -> std::io::Result<()> {
+    let output = std::process::Command::new("sc.exe")
+        .args(["start", "DiskTracker"])
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+        let out_msg = String::from_utf8_lossy(&output.stdout).to_string();
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("sc start failed: {}\n{}", err_msg, out_msg),
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn start_service() -> std::io::Result<()> {
+    println!("[Unix Mock] Service started.");
+    Ok(())
+}
+
+#[cfg(windows)]
+pub fn stop_service() -> std::io::Result<()> {
+    let output = std::process::Command::new("sc.exe")
+        .args(["stop", "DiskTracker"])
+        .output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
+        let out_msg = String::from_utf8_lossy(&output.stdout).to_string();
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("sc stop failed: {}\n{}", err_msg, out_msg),
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn stop_service() -> std::io::Result<()> {
+    println!("[Unix Mock] Service stopped.");
+    Ok(())
+}
+
