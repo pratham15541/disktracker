@@ -20,6 +20,8 @@ pub struct HistoryResponse {
     pub results: Vec<HistoryEntry>,
     pub truncated: bool,
     pub cursor: Option<String>,
+    pub next_cursor: Option<String>,
+    pub prev_cursor: Option<String>,
     pub debug_info: Option<String>,
 }
 
@@ -246,7 +248,18 @@ pub fn get_history(
     // Store string conversions in boxed slots to extend their lifetime for parameters iterator
     let mut dt_strings = Vec::new();
     let kind_string = kind.map(|k| k.to_string());
-    let cursor_val = cursor.and_then(|c| c.parse::<i64>().ok());
+    let mut is_backward = false;
+    let mut cursor_val = None;
+    if let Some(c) = cursor {
+        if c.starts_with("f:") {
+            cursor_val = c[2..].parse::<i64>().ok();
+        } else if c.starts_with("b:") {
+            is_backward = true;
+            cursor_val = c[2..].parse::<i64>().ok();
+        } else {
+            cursor_val = c.parse::<i64>().ok();
+        }
+    }
 
     if let Some(ref since_val) = since {
         let dt = chrono::DateTime::from_timestamp(*since_val, 0)
@@ -284,14 +297,21 @@ pub fn get_history(
 
     if let Some(ref cursor_seq) = cursor_val {
         params.push(cursor_seq as &dyn rusqlite::ToSql);
-        query.push_str(&format!(" AND sequence > ?{}", params.len()));
+        if is_backward {
+            query.push_str(&format!(" AND sequence < ?{}", params.len()));
+        } else {
+            query.push_str(&format!(" AND sequence > ?{}", params.len()));
+        }
     }
 
-    query.push_str(" ORDER BY sequence ASC");
+    if is_backward {
+        query.push_str(" ORDER BY sequence DESC");
+    } else {
+        query.push_str(" ORDER BY sequence ASC");
+    }
 
-    // Fetch slightly more if collapse is enabled to try filling the limit after collapse
     let fetch_limit = if collapse { limit * 2 } else { limit };
-    let limit_val = fetch_limit;
+    let limit_val = fetch_limit + 1;
     params.push(&limit_val as &dyn rusqlite::ToSql);
     query.push_str(&format!(" LIMIT ?{}", params.len()));
 
@@ -311,9 +331,19 @@ pub fn get_history(
         })
     }).map_err(|e| e.to_string())?;
 
-    let mut entries: Vec<HistoryEntry> = rows.flatten().collect();
+    let mut db_entries: Vec<HistoryEntry> = rows.flatten().collect();
+    let has_more = db_entries.len() > fetch_limit;
+    if has_more {
+        db_entries.truncate(fetch_limit);
+    }
 
-    // 3. Apply server-side collapse logic
+    if is_backward {
+        db_entries.reverse();
+    }
+
+    let mut entries = db_entries;
+
+    // Apply server-side collapse logic
     if collapse {
         let mut collapsed = Vec::with_capacity(entries.len());
         let mut iter = entries.into_iter();
@@ -337,17 +367,32 @@ pub fn get_history(
         entries = collapsed;
     }
 
-    // Truncate to exact limit if we fetched more
+    let collapsed_has_more = entries.len() > limit || has_more;
     if entries.len() > limit {
         entries.truncate(limit);
     }
 
-    // Set pagination cursor
-    let next_cursor = if entries.len() == limit {
-        entries.last().map(|e| e.sequence.to_string())
-    } else {
-        None
-    };
+    let mut next_cursor = None;
+    let mut prev_cursor = None;
+
+    if !entries.is_empty() {
+        let s_first = entries.first().unwrap().sequence;
+        let s_last = entries.last().unwrap().sequence;
+
+        if !is_backward {
+            if cursor.is_some() {
+                prev_cursor = Some(format!("b:{}", s_first));
+            }
+            if collapsed_has_more {
+                next_cursor = Some(format!("f:{}", s_last));
+            }
+        } else {
+            if collapsed_has_more {
+                prev_cursor = Some(format!("b:{}", s_first));
+            }
+            next_cursor = Some(format!("f:{}", s_last));
+        }
+    }
 
     let total_mutations: i64 = conn.query_row("SELECT COUNT(*) FROM mutation_log", [], |row| row.get(0)).unwrap_or(0);
     let matched_mutations: i64 = conn.query_row(
@@ -368,7 +413,9 @@ pub fn get_history(
     Ok(HistoryResponse {
         results: entries,
         truncated,
-        cursor: next_cursor,
+        cursor: next_cursor.clone(),
+        next_cursor,
+        prev_cursor,
         debug_info: Some(debug_info),
     })
 }

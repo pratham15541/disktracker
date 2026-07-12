@@ -481,13 +481,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Commands::Config { subcommand } => match subcommand {
             ConfigCommands::Get { key } => {
-                if key != "retention" && key != "retention-days" {
-                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days";
+                if key != "retention" && key != "retention-days" && key != "fuzzy" {
+                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days, fuzzy";
                     print_error(
                         cli.json,
                         "E_INVALID_PARAMS",
                         err_msg,
-                        Some(serde_json::json!({ "valid_keys": ["retention", "retention-days"] })),
+                        Some(serde_json::json!({ "valid_keys": ["retention", "retention-days", "fuzzy"] })),
                     );
                     std::process::exit(1);
                 }
@@ -520,13 +520,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ConfigCommands::Set { key, value } => {
-                if key != "retention" && key != "retention-days" {
-                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days";
+                if key != "retention" && key != "retention-days" && key != "fuzzy" {
+                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days, fuzzy";
                     print_error(
                         cli.json,
                         "E_INVALID_PARAMS",
                         err_msg,
-                        Some(serde_json::json!({ "valid_keys": ["retention", "retention-days"] })),
+                        Some(serde_json::json!({ "valid_keys": ["retention", "retention-days", "fuzzy"] })),
                     );
                     std::process::exit(1);
                 }
@@ -599,11 +599,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
 
+            let mut search_volume = volume.clone();
+            let mut search_path = path.clone();
+
+            if let Some(ref p) = path {
+                let p_buf = std::path::Path::new(p);
+                let p_str = p_buf.to_string_lossy().to_string();
+                let normalized = p_str.replace('\\', "/");
+                if normalized.len() >= 2 && normalized.as_bytes()[1] == b':' {
+                    let drive = normalized[0..2].to_uppercase();
+                    let remaining = normalized[2..].trim_start_matches('/').to_string();
+                    search_volume = Some(drive);
+                    search_path = if remaining.is_empty() {
+                        None
+                    } else {
+                        Some(remaining)
+                    };
+                }
+            }
+
             let params = serde_json::json!({
                 "query": query,
-                "path": path,
+                "path": search_path,
                 "ext": ext,
-                "volume": volume,
+                "volume": search_volume,
                 "min_size": min_size,
                 "max_size": max_size,
                 "modified_after": mod_after_ts,
@@ -1051,7 +1070,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
                         let next_cursor = result
-                            .get("cursor")
+                            .get("next_cursor")
+                            .and_then(|v| v.as_str());
+                        let prev_cursor = result
+                            .get("prev_cursor")
                             .and_then(|v| v.as_str());
 
                         if *json {
@@ -1199,8 +1221,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
 
-                            if let Some(c) = next_cursor {
-                                println!("\nNext page cursor: {}", c);
+                            if prev_cursor.is_some() || next_cursor.is_some() {
+                                println!();
+                                if let Some(prev) = prev_cursor {
+                                    print!("Previous page cursor: {}    ", prev);
+                                }
+                                if let Some(next) = next_cursor {
+                                    print!("Next page cursor: {}", next);
+                                }
+                                println!();
                             }
 
                             if *verbose {

@@ -224,8 +224,6 @@ pub async fn run_server(
     // Spawn pruning background task
     let (pruning_shutdown_tx, mut pruning_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
-        use chrono::{Datelike, Timelike};
-        let mut last_run_day = None;
         let mut last_test_run = std::time::Instant::now();
 
         loop {
@@ -241,13 +239,15 @@ pub async fn run_server(
                             run_pruning_cycle().await;
                         }
                     } else {
-                        let local_now = chrono::Local::now();
-                        if local_now.hour() == 3 && local_now.minute() == 0 {
-                            let day = local_now.day();
-                            if last_run_day != Some(day) {
-                                last_run_day = Some(day);
-                                run_pruning_cycle().await;
+                        let should_run = match get_last_successful_pruning_time() {
+                            Some(last_run) => {
+                                let elapsed = chrono::Utc::now().signed_duration_since(last_run);
+                                elapsed >= chrono::Duration::hours(24)
                             }
+                            None => true, // Never run successfully, run now
+                        };
+                        if should_run {
+                            run_pruning_cycle().await;
                         }
                     }
                 }
@@ -441,17 +441,22 @@ async fn handle_request(
         }
         "config_get" => {
             let key = req.params.get("key").and_then(|k| k.as_str()).unwrap_or("");
-            if key != "retention" && key != "retention-days" {
+            if key != "retention" && key != "retention-days" && key != "fuzzy" {
                 return JsonRpcResponse::error(
                     req.id,
                     -32602,
-                    "Invalid config key. Valid keys are: retention, retention-days".to_string(),
+                    "Invalid config key. Valid keys are: retention, retention-days, fuzzy".to_string(),
                 );
             }
             let config = config_mgr::load_config();
+            let value = if key == "fuzzy" {
+                config.fuzzy.to_string()
+            } else {
+                config.retention
+            };
             let res = serde_json::json!({
                 "key": key,
-                "value": config.retention
+                "value": value
             });
             JsonRpcResponse::success(req.id, res)
         }
@@ -462,13 +467,44 @@ async fn handle_request(
                 .get("value")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if key != "retention" && key != "retention-days" {
+            if key != "retention" && key != "retention-days" && key != "fuzzy" {
                 return JsonRpcResponse::error(
                     req.id,
                     -32602,
-                    "Invalid config key. Valid keys are: retention, retention-days".to_string(),
+                    "Invalid config key. Valid keys are: retention, retention-days, fuzzy".to_string(),
                 );
             }
+
+            if key == "fuzzy" {
+                let parsed_bool = match val_str.trim().to_lowercase().as_str() {
+                    "true" | "on" | "1" | "yes" => true,
+                    "false" | "off" | "0" | "no" => false,
+                    _ => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            "Invalid boolean value. Acceptable values: true, false, on, off".to_string(),
+                        );
+                    }
+                };
+
+                let mut config = config_mgr::load_config();
+                config.fuzzy = parsed_bool;
+                if let Err(e) = config_mgr::save_config(&config) {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32603,
+                        format!("Failed to save config: {}", e),
+                    );
+                }
+                let res = serde_json::json!({
+                    "key": key,
+                    "value": parsed_bool.to_string(),
+                    "message": "Fuzzy search setting updated."
+                });
+                return JsonRpcResponse::success(req.id, res);
+            }
+
             match config_mgr::parse_duration(val_str) {
                 Ok(_) => {
                     let mut config = config_mgr::load_config();
@@ -741,4 +777,17 @@ async fn handle_request(
         }
         _ => JsonRpcResponse::error(req.id, -32601, format!("Method not found: {}", req.method)),
     }
+}
+
+fn get_last_successful_pruning_time() -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(runs) = storage::get_latest_pruning_runs() {
+        for run in runs {
+            if run.status == "SUCCESS" {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&run.run_at) {
+                    return Some(dt.with_timezone(&chrono::Utc));
+                }
+            }
+        }
+    }
+    None
 }

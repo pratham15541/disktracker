@@ -8,6 +8,12 @@ use std::path::PathBuf;
 pub struct AppConfig {
     #[serde(alias = "retention-days", deserialize_with = "deserialize_retention")]
     pub retention: String,
+    #[serde(default = "default_fuzzy")]
+    pub fuzzy: bool,
+}
+
+fn default_fuzzy() -> bool {
+    true
 }
 
 fn deserialize_retention<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -58,6 +64,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             retention: "30d".to_string(),
+            fuzzy: true,
         }
     }
 }
