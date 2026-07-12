@@ -146,19 +146,32 @@ pub fn init_db() -> std::result::Result<PathBuf, Box<dyn Error>> {
         [],
     )?;
 
-    // Create snapshots table
+    // Drop old flat snapshots table if it exists
+    let _ = conn.execute("DROP TABLE IF EXISTS snapshots", []);
+
+    // Create parent_snapshots table
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS snapshots (
+        "CREATE TABLE IF NOT EXISTS parent_snapshots (
             id TEXT PRIMARY KEY,
-            label TEXT NOT NULL,
-            volume TEXT NOT NULL,
-            sequence_number INTEGER NOT NULL,
+            label TEXT UNIQUE NOT NULL,
             created_at TEXT NOT NULL,
             daemon_version TEXT NOT NULL,
             schema_version INTEGER NOT NULL,
-            retention_setting TEXT NOT NULL,
+            retention_setting TEXT NOT NULL
+        )",
+        [],
+    )?;
+
+    // Create volume_snapshots table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS volume_snapshots (
+            id TEXT PRIMARY KEY,
+            parent_id TEXT NOT NULL,
+            volume TEXT NOT NULL,
+            sequence_number INTEGER NOT NULL,
             facts_count INTEGER NOT NULL,
-            UNIQUE(volume, label)
+            FOREIGN KEY (parent_id) REFERENCES parent_snapshots(id) ON DELETE CASCADE,
+            UNIQUE(parent_id, volume)
         )",
         [],
     )?;
@@ -167,151 +180,209 @@ pub fn init_db() -> std::result::Result<PathBuf, Box<dyn Error>> {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SnapshotEntry {
+pub struct ParentSnapshotEntry {
     pub id: String,
     pub label: String,
-    pub volume: String,
-    pub sequence_number: i64,
     pub created_at: String,
     pub daemon_version: String,
     pub schema_version: i64,
     pub retention_setting: String,
+    pub volumes: Vec<VolumeSnapshotEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VolumeSnapshotEntry {
+    pub id: String,
+    pub parent_id: String,
+    pub volume: String,
+    pub sequence_number: i64,
     pub facts_count: i64,
 }
 
-pub fn create_snapshot_db(
+pub fn create_parent_snapshot_db(
     id: &str,
     label: &str,
-    volume: &str,
-    sequence_number: i64,
     daemon_version: &str,
     schema_version: i64,
     retention_setting: &str,
-    facts_count: i64,
 ) -> std::result::Result<(), Box<dyn Error>> {
     let conn = get_db_connection()?;
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO snapshots (id, label, volume, sequence_number, created_at, daemon_version, schema_version, retention_setting, facts_count)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-        rusqlite::params![id, label, volume, sequence_number, now, daemon_version, schema_version, retention_setting, facts_count],
+        "INSERT INTO parent_snapshots (id, label, created_at, daemon_version, schema_version, retention_setting)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![id, label, now, daemon_version, schema_version, retention_setting],
     )?;
     Ok(())
 }
 
-pub fn get_snapshot_by_label_or_id(
+pub fn create_volume_snapshot_db(
+    id: &str,
+    parent_id: &str,
     volume: &str,
+    sequence_number: i64,
+    facts_count: i64,
+) -> std::result::Result<(), Box<dyn Error>> {
+    let conn = get_db_connection()?;
+    conn.execute(
+        "INSERT INTO volume_snapshots (id, parent_id, volume, sequence_number, facts_count)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![id, parent_id, volume, sequence_number, facts_count],
+    )?;
+    Ok(())
+}
+
+pub fn get_parent_snapshot_by_label_or_id(
     input: &str,
-) -> std::result::Result<Option<SnapshotEntry>, Box<dyn Error>> {
+) -> std::result::Result<Option<ParentSnapshotEntry>, Box<dyn Error>> {
     let conn = get_db_connection()?;
     let mut stmt = conn.prepare(
-        "SELECT id, label, volume, sequence_number, created_at, daemon_version, schema_version, retention_setting, facts_count
-         FROM snapshots WHERE volume = ?1 AND (id = ?2 OR label = ?2)",
+        "SELECT id, label, created_at, daemon_version, schema_version, retention_setting
+         FROM parent_snapshots WHERE id = ?1 OR label = ?1",
     )?;
-    let mut rows = stmt.query(rusqlite::params![volume, input])?;
+    let mut rows = stmt.query(rusqlite::params![input])?;
     if let Some(row) = rows.next()? {
-        Ok(Some(SnapshotEntry {
-            id: row.get(0)?,
-            label: row.get(1)?,
-            volume: row.get(2)?,
-            sequence_number: row.get(3)?,
-            created_at: row.get(4)?,
-            daemon_version: row.get(5)?,
-            schema_version: row.get(6)?,
-            retention_setting: row.get(7)?,
-            facts_count: row.get(8)?,
+        let parent_id: String = row.get(0)?;
+        let label: String = row.get(1)?;
+        let created_at: String = row.get(2)?;
+        let daemon_version: String = row.get(3)?;
+        let schema_version: i64 = row.get(4)?;
+        let retention_setting: String = row.get(5)?;
+
+        let mut sub_stmt = conn.prepare(
+            "SELECT id, volume, sequence_number, facts_count FROM volume_snapshots WHERE parent_id = ?1",
+        )?;
+        let mut sub_rows = sub_stmt.query(rusqlite::params![parent_id])?;
+        let mut volumes = Vec::new();
+        while let Some(sub_row) = sub_rows.next()? {
+            volumes.push(VolumeSnapshotEntry {
+                id: sub_row.get(0)?,
+                parent_id: parent_id.clone(),
+                volume: sub_row.get(1)?,
+                sequence_number: sub_row.get(2)?,
+                facts_count: sub_row.get(3)?,
+            });
+        }
+
+        Ok(Some(ParentSnapshotEntry {
+            id: parent_id,
+            label,
+            created_at,
+            daemon_version,
+            schema_version,
+            retention_setting,
+            volumes,
         }))
     } else {
         Ok(None)
     }
 }
 
-pub fn check_snapshot_label_exists(
-    volume: &str,
+pub fn check_parent_snapshot_label_exists(
     label: &str,
-) -> std::result::Result<Option<SnapshotEntry>, Box<dyn Error>> {
+) -> std::result::Result<Option<ParentSnapshotEntry>, Box<dyn Error>> {
     let conn = get_db_connection()?;
     let mut stmt = conn.prepare(
-        "SELECT id, label, volume, sequence_number, created_at, daemon_version, schema_version, retention_setting, facts_count
-         FROM snapshots WHERE volume = ?1 AND label = ?2",
+        "SELECT id, label, created_at, daemon_version, schema_version, retention_setting
+         FROM parent_snapshots WHERE label = ?1",
     )?;
-    let mut rows = stmt.query(rusqlite::params![volume, label])?;
+    let mut rows = stmt.query(rusqlite::params![label])?;
     if let Some(row) = rows.next()? {
-        Ok(Some(SnapshotEntry {
-            id: row.get(0)?,
-            label: row.get(1)?,
-            volume: row.get(2)?,
-            sequence_number: row.get(3)?,
-            created_at: row.get(4)?,
-            daemon_version: row.get(5)?,
-            schema_version: row.get(6)?,
-            retention_setting: row.get(7)?,
-            facts_count: row.get(8)?,
+        let parent_id: String = row.get(0)?;
+        let label: String = row.get(1)?;
+        let created_at: String = row.get(2)?;
+        let daemon_version: String = row.get(3)?;
+        let schema_version: i64 = row.get(4)?;
+        let retention_setting: String = row.get(5)?;
+
+        let mut sub_stmt = conn.prepare(
+            "SELECT id, volume, sequence_number, facts_count FROM volume_snapshots WHERE parent_id = ?1",
+        )?;
+        let mut sub_rows = sub_stmt.query(rusqlite::params![parent_id])?;
+        let mut volumes = Vec::new();
+        while let Some(sub_row) = sub_rows.next()? {
+            volumes.push(VolumeSnapshotEntry {
+                id: sub_row.get(0)?,
+                parent_id: parent_id.clone(),
+                volume: sub_row.get(1)?,
+                sequence_number: sub_row.get(2)?,
+                facts_count: sub_row.get(3)?,
+            });
+        }
+
+        Ok(Some(ParentSnapshotEntry {
+            id: parent_id,
+            label,
+            created_at,
+            daemon_version,
+            schema_version,
+            retention_setting,
+            volumes,
         }))
     } else {
         Ok(None)
     }
 }
 
-pub fn list_snapshots_db(
-    volume: Option<&str>,
+pub fn list_parent_snapshots_db(
+    volume_filter: Option<&str>,
     limit: usize,
-    cursor_seq: Option<i64>,
-    is_backward: bool,
-) -> std::result::Result<Vec<SnapshotEntry>, Box<dyn Error>> {
+) -> std::result::Result<Vec<ParentSnapshotEntry>, Box<dyn Error>> {
     let conn = get_db_connection()?;
     let mut query = String::from(
-        "SELECT id, label, volume, sequence_number, created_at, daemon_version, schema_version, retention_setting, facts_count
-         FROM snapshots"
+        "SELECT id, label, created_at, daemon_version, schema_version, retention_setting
+         FROM parent_snapshots"
     );
     let mut params = Vec::new();
-    let mut conditions = Vec::new();
-
-    if let Some(v) = volume {
-        params.push(v.to_string());
-        conditions.push(format!("volume = ?{}", params.len()));
+    if let Some(vol) = volume_filter {
+        params.push(vol.to_string());
+        query.push_str(" WHERE id IN (SELECT parent_id FROM volume_snapshots WHERE volume = ?1)");
     }
-
-    if let Some(c) = cursor_seq {
-        params.push(c.to_string());
-        if is_backward {
-            conditions.push(format!("sequence_number < ?{}", params.len()));
-        } else {
-            conditions.push(format!("sequence_number > ?{}", params.len()));
-        }
-    }
-
-    if !conditions.is_empty() {
-        query.push_str(" WHERE ");
-        query.push_str(&conditions.join(" AND "));
-    }
-
-    if is_backward {
-        query.push_str(" ORDER BY sequence_number DESC LIMIT ");
-    } else {
-        query.push_str(" ORDER BY sequence_number ASC LIMIT ");
-    }
-    query.push_str(&(limit + 1).to_string());
+    
+    query.push_str(" ORDER BY created_at DESC LIMIT ");
+    query.push_str(&limit.to_string());
 
     let mut stmt = conn.prepare(&query)?;
     let mut rows = stmt.query(rusqlite::params_from_iter(params))?;
     let mut results = Vec::new();
     while let Some(row) = rows.next()? {
-        results.push(SnapshotEntry {
-            id: row.get(0)?,
-            label: row.get(1)?,
-            volume: row.get(2)?,
-            sequence_number: row.get(3)?,
-            created_at: row.get(4)?,
-            daemon_version: row.get(5)?,
-            schema_version: row.get(6)?,
-            retention_setting: row.get(7)?,
-            facts_count: row.get(8)?,
-        });
-    }
+        let parent_id: String = row.get(0)?;
+        let label: String = row.get(1)?;
+        let created_at: String = row.get(2)?;
+        let daemon_version: String = row.get(3)?;
+        let schema_version: i64 = row.get(4)?;
+        let retention_setting: String = row.get(5)?;
 
-    if is_backward {
-        results.reverse();
+        let mut sub_stmt = conn.prepare(
+            "SELECT id, volume, sequence_number, facts_count FROM volume_snapshots WHERE parent_id = ?1",
+        )?;
+        let mut sub_rows = sub_stmt.query(rusqlite::params![parent_id])?;
+        let mut volumes = Vec::new();
+        while let Some(sub_row) = sub_rows.next()? {
+            let child_vol: String = sub_row.get(1)?;
+            if let Some(vf) = volume_filter {
+                if child_vol != vf {
+                    continue;
+                }
+            }
+            volumes.push(VolumeSnapshotEntry {
+                id: sub_row.get(0)?,
+                parent_id: parent_id.clone(),
+                volume: child_vol,
+                sequence_number: sub_row.get(2)?,
+                facts_count: sub_row.get(3)?,
+            });
+        }
+
+        results.push(ParentSnapshotEntry {
+            id: parent_id,
+            label,
+            created_at,
+            daemon_version,
+            schema_version,
+            retention_setting,
+            volumes,
+        });
     }
 
     Ok(results)

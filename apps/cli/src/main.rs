@@ -31,7 +31,15 @@ enum Commands {
     /// Run diagnostic checks (permissions, journal, DB integrity)
     Doctor,
     /// Stop the running daemon, delete named pipe, and clean up database files/folders
-    Uninstall,
+    Uninstall {
+        /// Delete snapshots as well (defaults to false / keeping snapshots)
+        #[arg(long, default_value_t = false)]
+        delete_snapshot: bool,
+
+        /// Auto-approve the uninstallation confirmation prompt
+        #[arg(short = 'y', long, default_value_t = false)]
+        yes: bool,
+    },
     /// Manage the Windows Service (register, unregister, start, stop)
     Service {
         #[command(subcommand)]
@@ -161,14 +169,17 @@ enum ConfigCommands {
 
 #[derive(Subcommand)]
 enum SnapshotCommands {
-    /// Create a new snapshot of a volume
+    /// Create a new snapshot. E.g. snapshot create --label before-update [volume/path]
     Create {
         /// Label for the snapshot (auto-generated if omitted)
         #[arg(long)]
         label: Option<String>,
-        /// The volume to snapshot (defaults to current drive, e.g. C:)
+        /// The volume or path to snapshot (defaults to all registered volumes if omitted)
+        #[arg(index = 1)]
+        path_or_volume: Option<String>,
+        /// Snapshot all volumes explicitly
         #[arg(long)]
-        volume: Option<String>,
+        all: bool,
     },
     /// List all snapshots in the database
     List {
@@ -441,8 +452,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Doctor => {
             run_doctor().await;
         }
-        Commands::Uninstall => {
-            if let Err(e) = run_uninstall().await {
+        Commands::Uninstall { delete_snapshot, yes } => {
+            if let Err(e) = run_uninstall(*delete_snapshot, *yes).await {
                 eprintln!("[Cli] Uninstall failed: {:?}", e);
                 std::process::exit(1);
             }
@@ -524,13 +535,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Commands::Config { subcommand } => match subcommand {
             ConfigCommands::Get { key } => {
-                if key != "retention" && key != "retention-days" && key != "fuzzy" {
-                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days, fuzzy.\nExamples:\n  disktracker config get fuzzy\n  disktracker config get retention";
+                if key != "retention" && key != "retention-days" && key != "fuzzy" && key != "auto-snapshot" && key != "auto-snapshot-interval" {
+                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days, fuzzy, auto-snapshot, auto-snapshot-interval.\nExamples:\n  disktracker config get fuzzy\n  disktracker config get auto-snapshot\n  disktracker config get auto-snapshot-interval";
                     print_error(
                         cli.json,
                         "E_INVALID_PARAMS",
                         err_msg,
-                        Some(serde_json::json!({ "valid_keys": ["retention", "retention-days", "fuzzy"] })),
+                        Some(serde_json::json!({ "valid_keys": ["retention", "retention-days", "fuzzy", "auto-snapshot", "auto-snapshot-interval"] })),
                     );
                     std::process::exit(1);
                 }
@@ -563,13 +574,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ConfigCommands::Set { key, value } => {
-                if key != "retention" && key != "retention-days" && key != "fuzzy" {
-                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days, fuzzy.\nExamples:\n  disktracker config set fuzzy false\n  disktracker config set retention 24h\n  disktracker config set retention-days 7";
+                if key != "retention" && key != "retention-days" && key != "fuzzy" && key != "auto-snapshot" && key != "auto-snapshot-interval" {
+                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days, fuzzy, auto-snapshot, auto-snapshot-interval.\nExamples:\n  disktracker config set auto-snapshot true\n  disktracker config set auto-snapshot-interval 24h\n  disktracker config set auto-snapshot-interval 1min";
                     print_error(
                         cli.json,
                         "E_INVALID_PARAMS",
                         err_msg,
-                        Some(serde_json::json!({ "valid_keys": ["retention", "retention-days", "fuzzy"] })),
+                        Some(serde_json::json!({ "valid_keys": ["retention", "retention-days", "fuzzy", "auto-snapshot", "auto-snapshot-interval"] })),
                     );
                     std::process::exit(1);
                 }
@@ -1299,32 +1310,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Snapshot { subcommand } => match subcommand {
-            SnapshotCommands::Create { label, volume } => {
-                let vol_to_use = match volume {
-                    Some(v) => {
-                        let mut uppercase = v.to_uppercase();
-                        if !uppercase.ends_with(':') {
-                            uppercase.push(':');
-                        }
-                        uppercase
-                    }
-                    None => {
-                        match std::env::current_dir() {
-                            Ok(cwd) => {
-                                let path_str = cwd.to_string_lossy().to_string();
-                                if path_str.len() >= 2 && path_str.as_bytes()[1] == b':' {
-                                    path_str[0..2].to_uppercase()
-                                } else {
-                                    "C:".to_string()
+            SnapshotCommands::Create { label, path_or_volume, all } => {
+                let mut vols_to_snap = Vec::new();
+
+                if *all || path_or_volume.is_none() {
+                    match query_status().await {
+                        Ok(resp) => {
+                            if let Some(res) = resp.result {
+                                if let Some(volumes_map) = res.get("volumes").and_then(|v| v.as_object()) {
+                                    for vol in volumes_map.keys() {
+                                        vols_to_snap.push(vol.clone());
+                                    }
                                 }
                             }
-                            Err(_) => "C:".to_string()
                         }
+                        Err(_) => {}
                     }
-                };
+                    if vols_to_snap.is_empty() {
+                        let vol = resolve_volume_from_path_or_cwd("");
+                        vols_to_snap.push(vol);
+                    }
+                } else {
+                    let vol = resolve_volume_from_path_or_cwd(path_or_volume.as_deref().unwrap_or(""));
+                    vols_to_snap.push(vol);
+                }
 
                 let params = serde_json::json!({
-                    "volume": vol_to_use,
+                    "volumes": vols_to_snap,
                     "label": label,
                 });
 
@@ -1337,7 +1349,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if let Some(result) = resp.result {
                             let job_id = result.get("job_id").and_then(|j| j.as_str()).unwrap_or("");
                             if !cli.json {
-                                println!("Creating snapshot for volume {} (job: {})...", vol_to_use, job_id);
+                                println!("Creating snapshot for volumes {:?} (job: {})...", vols_to_snap, job_id);
                             }
                             
                             // Poll job completion
@@ -1361,10 +1373,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     println!("{}", serde_json::to_string_pretty(&job_val).unwrap());
                                                 } else {
                                                     if let Some(res_details) = job_val.get("result") {
-                                                        let snap_id = res_details.get("id").and_then(|s| s.as_str()).unwrap_or("");
+                                                        let parent_id = res_details.get("id").and_then(|s| s.as_str()).unwrap_or("");
                                                         let final_label = res_details.get("label").and_then(|l| l.as_str()).unwrap_or("");
-                                                        let seq = res_details.get("sequence_number").and_then(|s| s.as_i64()).unwrap_or(0);
-                                                        println!("Snapshot \"{}\" created successfully (id: {}, sequence: {}).", final_label, snap_id, seq);
+                                                        println!("Parent Snapshot \"{}\" created successfully (id: {}).", final_label, parent_id);
+                                                        if let Some(vols) = res_details.get("volumes").and_then(|v| v.as_array()) {
+                                                            let child_count = vols.len();
+                                                            for (idx, v) in vols.iter().enumerate() {
+                                                                let is_last_child = idx == child_count - 1;
+                                                                let prefix = if is_last_child { "└── " } else { "├── " };
+                                                                let v_name = v.get("volume").and_then(|s| s.as_str()).unwrap_or("");
+                                                                let child_id = v.get("id").and_then(|s| s.as_str()).unwrap_or("");
+                                                                let seq = v.get("sequence_number").and_then(|s| s.as_i64()).unwrap_or(0);
+                                                                let count = v.get("facts_count").and_then(|s| s.as_i64()).unwrap_or(0);
+                                                                println!("{}Volume: {} (ID: {}, Sequence: {}, Facts: {})", prefix, v_name, child_id, seq, count);
+                                                            }
+                                                        }
                                                     }
                                                 }
                                                 break;
@@ -1414,135 +1437,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     return Ok(());
                                 }
 
-                                let next_cursor = result.get("next_cursor").and_then(|c| c.as_str());
-                                let prev_cursor = result.get("prev_cursor").and_then(|c| c.as_str());
-
-                                let mut max_label = 5;
-                                let mut max_created = 19;
-                                let mut max_vol = 6;
-                                let mut max_age = 3;
-                                let mut max_id = 11;
-                                let mut max_seq = 8;
-                                let mut max_daemon = 7;
-                                let mut max_schema = 6;
-                                let mut max_retention = 9;
-                                let mut max_facts = 11;
-
-                                let mut relative_ages = Vec::new();
-                                let mut absolute_times = Vec::new();
-
                                 for item in &results {
-                                    let label = item.get("label").and_then(|l| l.as_str()).unwrap_or("");
+                                    let parent_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                    let label = item.get("label").and_then(|v| v.as_str()).unwrap_or("");
                                     let created = item.get("created_at").and_then(|c| c.as_str()).unwrap_or("");
-                                    let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
-                                    let id = item.get("id").and_then(|i| i.as_str()).unwrap_or("");
-                                    let seq = item.get("sequence_number").and_then(|s| s.as_i64()).unwrap_or(0).to_string();
                                     let daemon = item.get("daemon_version").and_then(|d| d.as_str()).unwrap_or("");
-                                    let schema = item.get("schema_version").and_then(|s| s.as_i64()).unwrap_or(0).to_string();
+                                    let schema = item.get("schema_version").and_then(|s| s.as_i64()).unwrap_or(2);
                                     let retention = item.get("retention_setting").and_then(|r| r.as_str()).unwrap_or("");
-                                    let facts = item.get("facts_count").and_then(|f| f.as_i64()).unwrap_or(0).to_string();
 
                                     let rel_age = format_relative_time(created);
                                     let abs_time = format_absolute_time(created);
 
-                                    relative_ages.push(rel_age.clone());
-                                    absolute_times.push(abs_time.clone());
-
-                                    max_label = max_label.max(label.len());
-                                    max_created = max_created.max(abs_time.len());
-                                    max_vol = max_vol.max(vol.len());
-                                    max_age = max_age.max(rel_age.len());
-                                    max_id = max_id.max(id.len());
-                                    max_seq = max_seq.max(seq.len());
-                                    max_daemon = max_daemon.max(daemon.len());
-                                    max_schema = max_schema.max(schema.len());
-                                    max_retention = max_retention.max(retention.len());
-                                    max_facts = max_facts.max(facts.len());
-                                }
-
-                                if cli.verbose {
-                                    println!(
-                                        "{:<width_id$} | {:<width_label$} | {:<width_created$} | {:<width_vol$} | {:<width_age$} | {:<width_seq$} | {:<width_daemon$} | {:<width_schema$} | {:<width_retention$} | {:<width_facts$}",
-                                        "Snapshot ID", "Label", "Created", "Volume", "Age", "Seq Ref", "Daemon", "Schema", "Retention", "Facts Count",
-                                        width_id = max_id,
-                                        width_label = max_label,
-                                        width_created = max_created,
-                                        width_vol = max_vol,
-                                        width_age = max_age,
-                                        width_seq = max_seq,
-                                        width_daemon = max_daemon,
-                                        width_schema = max_schema,
-                                        width_retention = max_retention,
-                                        width_facts = max_facts
-                                    );
-                                    println!(
-                                        "{}",
-                                        "-".repeat(max_id + max_label + max_created + max_vol + max_age + max_seq + max_daemon + max_schema + max_retention + max_facts + 27)
-                                    );
-                                    for (i, item) in results.iter().enumerate() {
-                                        let id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                        let label = item.get("label").and_then(|v| v.as_str()).unwrap_or("");
-                                        let abs_time = &absolute_times[i];
-                                        let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
-                                        let rel_age = &relative_ages[i];
-                                        let seq = item.get("sequence_number").and_then(|s| s.as_i64()).unwrap_or(0);
-                                        let daemon = item.get("daemon_version").and_then(|v| v.as_str()).unwrap_or("");
-                                        let schema = item.get("schema_version").and_then(|s| s.as_i64()).unwrap_or(0);
-                                        let retention = item.get("retention_setting").and_then(|v| v.as_str()).unwrap_or("");
-                                        let facts = item.get("facts_count").and_then(|f| f.as_i64()).unwrap_or(0);
-
+                                    if cli.verbose {
                                         println!(
-                                            "{:<width_id$} | {:<width_label$} | {:<width_created$} | {:<width_vol$} | {:<width_age$} | {:<width_seq$} | {:<width_daemon$} | {:<width_schema$} | {:<width_retention$} | {:<width_facts$}",
-                                            id, label, abs_time, vol, rel_age, seq, daemon, schema, retention, facts,
-                                            width_id = max_id,
-                                            width_label = max_label,
-                                            width_created = max_created,
-                                            width_vol = max_vol,
-                                            width_age = max_age,
-                                            width_seq = max_seq,
-                                            width_daemon = max_daemon,
-                                            width_schema = max_schema,
-                                            width_retention = max_retention,
-                                            width_facts = max_facts
+                                            "[{}] {} (Created: {}, Age: {}, Daemon: v{}, Schema: {}, Retention: {})",
+                                            parent_id, label, abs_time, rel_age, daemon, schema, retention
+                                        );
+                                    } else {
+                                        println!(
+                                            "[{}] {} ({})",
+                                            parent_id, label, rel_age
                                         );
                                     }
-                                } else {
-                                    println!(
-                                        "{:<width_label$} | {:<width_created$} | {:<width_vol$} | {:<width_age$}",
-                                        "Label", "Created", "Volume", "Age",
-                                        width_label = max_label,
-                                        width_created = max_created,
-                                        width_vol = max_vol,
-                                        width_age = max_age
-                                    );
-                                    println!(
-                                        "{}",
-                                        "-".repeat(max_label + max_created + max_vol + max_age + 9)
-                                    );
-                                    for (i, item) in results.iter().enumerate() {
-                                        let label = item.get("label").and_then(|v| v.as_str()).unwrap_or("");
-                                        let abs_time = &absolute_times[i];
-                                        let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
-                                        let rel_age = &relative_ages[i];
 
-                                        println!(
-                                            "{:<width_label$} | {:<width_created$} | {:<width_vol$} | {:<width_age$}",
-                                            label, abs_time, vol, rel_age,
-                                            width_label = max_label,
-                                            width_created = max_created,
-                                            width_vol = max_vol,
-                                            width_age = max_age
-                                        );
-                                    }
-                                }
+                                    if let Some(vols) = item.get("volumes").and_then(|v| v.as_array()) {
+                                        let child_count = vols.len();
+                                        for (idx, vol_val) in vols.iter().enumerate() {
+                                            let is_last_child = idx == child_count - 1;
+                                            let prefix = if is_last_child { "└── " } else { "├── " };
 
-                                if prev_cursor.is_some() || next_cursor.is_some() {
-                                    println!();
-                                    if let Some(prev) = prev_cursor {
-                                        print!("Previous page cursor: {}    ", prev);
-                                    }
-                                    if let Some(next) = next_cursor {
-                                        print!("Next page cursor: {}", next);
+                                            let child_id = vol_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                            let vol_name = vol_val.get("volume").and_then(|v| v.as_str()).unwrap_or("");
+                                            let seq = vol_val.get("sequence_number").and_then(|s| s.as_i64()).unwrap_or(0);
+                                            let count = vol_val.get("facts_count").and_then(|f| f.as_i64()).unwrap_or(0);
+
+                                            if cli.verbose {
+                                                println!(
+                                                    "{}Volume: {} (ID: {}, Sequence: {}, Facts: {})",
+                                                    prefix, vol_name, child_id, seq, count
+                                                );
+                                            } else {
+                                                println!(
+                                                    "{}Volume: {} (Sequence: {}, Facts: {})",
+                                                    prefix, vol_name, seq, count
+                                                );
+                                            }
+                                        }
                                     }
                                     println!();
                                 }
@@ -2010,17 +1950,24 @@ async fn run_doctor() {
     }
 }
 
-async fn run_uninstall() -> Result<(), Box<dyn std::error::Error>> {
-    print!("Are you sure you want to stop the daemon and delete all database files? [y/N]: ");
-    use std::io::Write;
-    std::io::stdout().flush()?;
+async fn run_uninstall(delete_snapshot: bool, yes: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if !yes {
+        let msg = if delete_snapshot {
+            "Are you sure you want to stop the daemon and uninstall DiskTracker (snapshots WILL be deleted)? [y/N]: "
+        } else {
+            "Are you sure you want to stop the daemon and uninstall DiskTracker (snapshots will be preserved)? [y/N]: "
+        };
+        print!("{}", msg);
+        use std::io::Write;
+        std::io::stdout().flush()?;
 
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    let input = input.trim().to_lowercase();
-    if input != "y" && input != "yes" {
-        println!("[Cli] Uninstall aborted.");
-        return Ok(());
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim().to_lowercase();
+        if input != "y" && input != "yes" {
+            println!("[Cli] Uninstall aborted.");
+            return Ok(());
+        }
     }
 
     println!("[Cli] Starting uninstallation...");
@@ -2066,29 +2013,55 @@ async fn run_uninstall() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // 3. Delete SQLite database files and AppData folder
+    // 3. Delete SQLite database files or clean them up, and delete AppData folder
     let db_dir = storage::get_db_dir()?;
     if db_dir.exists() {
-        println!(
-            "[Cli] Deleting database files and directory at {:?}...",
-            db_dir
-        );
-        let mut retries = 5;
-        loop {
-            match std::fs::remove_dir_all(&db_dir) {
-                Ok(_) => {
-                    println!("  [OK] Database files and directory deleted.");
-                    break;
-                }
-                Err(e) => {
-                    if retries > 0 {
-                        println!("  [INFO] Directory locked, retrying deletion in 200ms...");
-                        retries -= 1;
-                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                    } else {
-                        return Err(Box::new(e));
+        if delete_snapshot {
+            println!(
+                "[Cli] Deleting database files and directory at {:?}...",
+                db_dir
+            );
+            let mut retries = 5;
+            loop {
+                match std::fs::remove_dir_all(&db_dir) {
+                    Ok(_) => {
+                        println!("  [OK] Database files and directory deleted.");
+                        break;
+                    }
+                    Err(e) => {
+                        if retries > 0 {
+                            println!("  [INFO] Directory locked, retrying deletion in 200ms...");
+                            retries -= 1;
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        } else {
+                            return Err(Box::new(e));
+                        }
                     }
                 }
+            }
+        } else {
+            println!(
+                "[Cli] Keeping snapshots, but clearing facts, logs, and config in database directory at {:?}...",
+                db_dir
+            );
+            // delete config.toml
+            let mut config_path = db_dir.clone();
+            config_path.push("config.toml");
+            if config_path.exists() {
+                let _ = std::fs::remove_file(&config_path);
+                println!("  [OK] config.toml deleted.");
+            }
+            // Clear database tables
+            let mut db_path = db_dir.clone();
+            db_path.push("disktracker.db");
+            if db_path.exists() {
+                let conn = rusqlite::Connection::open(&db_path)?;
+                let _ = conn.execute("DELETE FROM facts", []);
+                let _ = conn.execute("DELETE FROM mutation_log", []);
+                let _ = conn.execute("DELETE FROM drain_state", []);
+                let _ = conn.execute("DELETE FROM pruning_log", []);
+                let _ = conn.execute("VACUUM", []);
+                println!("  [OK] Database facts, mutation logs, and operational tables cleared (snapshots preserved).");
             }
         }
     } else {
@@ -2230,4 +2203,35 @@ fn format_size_delta(bytes: i64) -> String {
     } else {
         "0 B".to_string()
     }
+}
+
+fn resolve_volume_from_path(p: &str) -> Option<String> {
+    let p_trimmed = p.trim();
+    if p_trimmed.is_empty() {
+        return None;
+    }
+    if p_trimmed.len() >= 2 && p_trimmed.as_bytes()[1] == b':' {
+        let drive = &p_trimmed[0..2].to_uppercase();
+        return Some(drive.clone());
+    }
+    if p_trimmed.len() == 1 {
+        let first_char = p_trimmed.chars().next().unwrap();
+        if first_char.is_ascii_alphabetic() {
+            return Some(format!("{}:", first_char.to_ascii_uppercase()));
+        }
+    }
+    None
+}
+
+fn resolve_volume_from_path_or_cwd(p: &str) -> String {
+    if let Some(vol) = resolve_volume_from_path(p) {
+        return vol;
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let path_str = cwd.to_string_lossy().to_string();
+        if let Some(vol) = resolve_volume_from_path(&path_str) {
+            return vol;
+        }
+    }
+    "C:".to_string()
 }

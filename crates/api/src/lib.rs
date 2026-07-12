@@ -259,6 +259,44 @@ pub async fn run_server(
         }
     });
 
+    // Spawn auto-snapshot background task
+    let (_auto_snap_shutdown_tx, mut auto_snap_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
+                    let config = config_mgr::load_config();
+                    if config.auto_snapshot {
+                        let dur = match config_mgr::parse_any_duration(&config.auto_snapshot_interval) {
+                            Ok(d) => d,
+                            Err(e) => {
+                                eprintln!("[Auto-Snapshot] Invalid interval '{}': {}. Defaulting to 24h.", config.auto_snapshot_interval, e);
+                                chrono::Duration::hours(24)
+                            }
+                        };
+
+                        let should_run = match snapshots::get_last_auto_snapshot_time() {
+                            Some(last_time) => {
+                                let elapsed = chrono::Utc::now().signed_duration_since(last_time);
+                                elapsed >= dur
+                            }
+                            None => true, // Never run successfully, run now immediately
+                        };
+
+                        if should_run {
+                            if let Err(e) = snapshots::trigger_auto_snapshot_for_all_volumes() {
+                                eprintln!("[Auto-Snapshot] Error during auto-snapshot: {}", e);
+                            }
+                        }
+                    }
+                }
+                _ = &mut auto_snap_shutdown_rx => {
+                    break;
+                }
+            }
+        }
+    });
+
     let mut listener = create_listener(pipe_path).await?;
     let started_at = chrono::Utc::now();
     loop {
@@ -442,18 +480,19 @@ async fn handle_request(
         }
         "config_get" => {
             let key = req.params.get("key").and_then(|k| k.as_str()).unwrap_or("");
-            if key != "retention" && key != "retention-days" && key != "fuzzy" {
+            if key != "retention" && key != "retention-days" && key != "fuzzy" && key != "auto-snapshot" && key != "auto-snapshot-interval" {
                 return JsonRpcResponse::error(
                     req.id,
                     -32602,
-                    "Invalid config key. Valid keys are: retention, retention-days, fuzzy".to_string(),
+                    "Invalid config key. Valid keys are: retention, retention-days, fuzzy, auto-snapshot, auto-snapshot-interval".to_string(),
                 );
             }
             let config = config_mgr::load_config();
-            let value = if key == "fuzzy" {
-                config.fuzzy.to_string()
-            } else {
-                config.retention
+            let value = match key {
+                "fuzzy" => config.fuzzy.to_string(),
+                "auto-snapshot" => config.auto_snapshot.to_string(),
+                "auto-snapshot-interval" => config.auto_snapshot_interval.clone(),
+                _ => config.retention.clone()
             };
             let res = serde_json::json!({
                 "key": key,
@@ -468,11 +507,11 @@ async fn handle_request(
                 .get("value")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if key != "retention" && key != "retention-days" && key != "fuzzy" {
+            if key != "retention" && key != "retention-days" && key != "fuzzy" && key != "auto-snapshot" && key != "auto-snapshot-interval" {
                 return JsonRpcResponse::error(
                     req.id,
                     -32602,
-                    "Invalid config key. Valid keys are: retention, retention-days, fuzzy".to_string(),
+                    "Invalid config key. Valid keys are: retention, retention-days, fuzzy, auto-snapshot, auto-snapshot-interval".to_string(),
                 );
             }
 
@@ -504,6 +543,59 @@ async fn handle_request(
                     "message": "Fuzzy search setting updated."
                 });
                 return JsonRpcResponse::success(req.id, res);
+            }
+
+            if key == "auto-snapshot" {
+                let parsed_bool = match val_str.trim().to_lowercase().as_str() {
+                    "true" | "on" | "1" | "yes" => true,
+                    "false" | "off" | "0" | "no" => false,
+                    _ => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32602,
+                            "Invalid boolean value. Acceptable values: true, false, on, off".to_string(),
+                        );
+                    }
+                };
+
+                let mut config = config_mgr::load_config();
+                config.auto_snapshot = parsed_bool;
+                if let Err(e) = config_mgr::save_config(&config) {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32603,
+                        format!("Failed to save config: {}", e),
+                    );
+                }
+                let res = serde_json::json!({
+                    "key": key,
+                    "value": parsed_bool.to_string(),
+                    "message": "Auto-snapshot setting updated."
+                });
+                return JsonRpcResponse::success(req.id, res);
+            }
+
+            if key == "auto-snapshot-interval" {
+                match config_mgr::parse_any_duration(val_str) {
+                    Ok(_) => {
+                        let mut config = config_mgr::load_config();
+                        config.auto_snapshot_interval = val_str.to_string();
+                        if let Err(e) = config_mgr::save_config(&config) {
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32603,
+                                format!("Failed to save config: {}", e),
+                            );
+                        }
+                        let res = serde_json::json!({
+                            "key": key,
+                            "value": val_str,
+                            "message": "Auto-snapshot interval updated."
+                        });
+                        return JsonRpcResponse::success(req.id, res);
+                    }
+                    Err(e) => return JsonRpcResponse::error(req.id, -32602, e),
+                }
             }
 
             match config_mgr::parse_duration(val_str) {

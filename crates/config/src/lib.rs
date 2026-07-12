@@ -10,10 +10,22 @@ pub struct AppConfig {
     pub retention: String,
     #[serde(default = "default_fuzzy")]
     pub fuzzy: bool,
+    #[serde(default = "default_auto_snapshot", alias = "auto-snapshot")]
+    pub auto_snapshot: bool,
+    #[serde(default = "default_auto_snapshot_interval", alias = "auto-snapshot-interval")]
+    pub auto_snapshot_interval: String,
 }
 
 fn default_fuzzy() -> bool {
     true
+}
+
+fn default_auto_snapshot() -> bool {
+    false
+}
+
+fn default_auto_snapshot_interval() -> String {
+    "24h".to_string()
 }
 
 fn deserialize_retention<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -65,6 +77,8 @@ impl Default for AppConfig {
         Self {
             retention: "30d".to_string(),
             fuzzy: true,
+            auto_snapshot: false,
+            auto_snapshot_interval: "24h".to_string(),
         }
     }
 }
@@ -107,7 +121,7 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
-pub fn parse_duration(s: &str) -> Result<chrono::Duration, String> {
+pub fn parse_any_duration(s: &str) -> Result<chrono::Duration, String> {
     let s = s.trim().to_lowercase();
     if s.is_empty() {
         return Err("Duration string cannot be empty".to_string());
@@ -143,18 +157,30 @@ pub fn parse_duration(s: &str) -> Result<chrono::Duration, String> {
     let unit_str = unit_str.trim();
 
     let duration = match unit_str {
+        "s" | "sec" | "second" | "seconds" => chrono::Duration::seconds(num),
+        "min" | "minute" | "minutes" => chrono::Duration::minutes(num),
+        "h" | "hr" | "hour" | "hours" => chrono::Duration::hours(num),
         "" | "d" | "day" | "days" => chrono::Duration::days(num),
-        "h" | "hour" | "hours" => chrono::Duration::hours(num),
-        "m" | "month" | "months" => chrono::Duration::days(num * 30),
+        "w" | "week" | "weeks" => chrono::Duration::weeks(num),
+        "m" | "mo" | "month" | "months" => chrono::Duration::days(num * 30),
         "y" | "year" | "years" => chrono::Duration::days(num * 365),
         _ => {
             return Err(format!(
-                "Unknown duration unit: '{}' (supported: h, d, m, y)",
+                "Unknown duration unit: '{}' (supported: s, min, h, d, w, m, y)",
                 unit_str
             ))
         }
     };
 
+    if duration.num_seconds() <= 0 {
+        return Err("Duration must be positive.".to_string());
+    }
+
+    Ok(duration)
+}
+
+pub fn parse_duration(s: &str) -> Result<chrono::Duration, String> {
+    let duration = parse_any_duration(s)?;
     let min_dur = chrono::Duration::hours(1);
     let max_dur = chrono::Duration::days(3650);
 
