@@ -119,7 +119,10 @@ pub fn init_db() -> std::result::Result<PathBuf, Box<dyn Error>> {
             }
         }
         if !has_attributes {
-            conn.execute("ALTER TABLE facts ADD COLUMN attributes INTEGER NOT NULL DEFAULT 0", [])?;
+            conn.execute(
+                "ALTER TABLE facts ADD COLUMN attributes INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
         }
     }
 
@@ -154,7 +157,11 @@ pub struct PruningLogEntry {
     pub details: String,
 }
 
-pub fn log_pruning_run(volume: &str, status: &str, details: &str) -> std::result::Result<(), Box<dyn Error>> {
+pub fn log_pruning_run(
+    volume: &str,
+    status: &str,
+    details: &str,
+) -> std::result::Result<(), Box<dyn Error>> {
     let conn = get_db_connection()?;
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
@@ -166,9 +173,8 @@ pub fn log_pruning_run(volume: &str, status: &str, details: &str) -> std::result
 
 pub fn get_latest_pruning_runs() -> std::result::Result<Vec<PruningLogEntry>, Box<dyn Error>> {
     let conn = get_db_connection()?;
-    let mut stmt = conn.prepare(
-        "SELECT volume, run_at, status, details FROM pruning_log ORDER BY run_at DESC"
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT volume, run_at, status, details FROM pruning_log ORDER BY run_at DESC")?;
     let rows = stmt.query_map([], |row| {
         Ok(PruningLogEntry {
             volume: row.get(0)?,
@@ -183,4 +189,3 @@ pub fn get_latest_pruning_runs() -> std::result::Result<Vec<PruningLogEntry>, Bo
     }
     Ok(results)
 }
-

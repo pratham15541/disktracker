@@ -17,12 +17,17 @@ struct PendingMutation {
 pub async fn run_drain_engine(volume: String, startup_seq: i64) {
     println!("[DrainEngine - {}] Starting background task", volume);
     let tracker = core_types::get_volume_tracker(&volume);
-    tracker.replaying.store(false, std::sync::atomic::Ordering::Relaxed);
+    tracker
+        .replaying
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 
     let mut conn = match storage::get_db_connection() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[DrainEngine - {}] Critical: failed to open DB connection: {:?}", volume, e);
+            eprintln!(
+                "[DrainEngine - {}] Critical: failed to open DB connection: {:?}",
+                volume, e
+            );
             return;
         }
     };
@@ -49,7 +54,10 @@ pub async fn run_drain_engine(volume: String, startup_seq: i64) {
         let processed = match drain_batch(&mut conn, &volume) {
             Ok(count) => count,
             Err(e) => {
-                eprintln!("[DrainEngine - {}] Error during reconciliation: {:?}", volume, e);
+                eprintln!(
+                    "[DrainEngine - {}] Error during reconciliation: {:?}",
+                    volume, e
+                );
                 0
             }
         };
@@ -59,7 +67,10 @@ pub async fn run_drain_engine(volume: String, startup_seq: i64) {
             let mut state_lock = tracker.state.lock().unwrap();
             if *state_lock == core_types::DaemonState::Reconciling {
                 *state_lock = core_types::DaemonState::Live;
-                println!("[DrainEngine - {}] Caught up with mutation log. State is Live.", volume);
+                println!(
+                    "[DrainEngine - {}] Caught up with mutation log. State is Live.",
+                    volume
+                );
                 drop(state_lock);
                 // FIX 3: Force a final commit of any staged Tantivy mutations accumulated
                 // during the replay. Without this, deletes staged in the last batch are
@@ -93,7 +104,9 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
         )
         .unwrap_or(0);
 
-    tracker.mutations_replayed.store(last_sequence as u64, std::sync::atomic::Ordering::Relaxed);
+    tracker
+        .mutations_replayed
+        .store(last_sequence as u64, std::sync::atomic::Ordering::Relaxed);
 
     // 2. Fetch up to 500 pending mutations
     let mutations: Vec<PendingMutation> = {
@@ -124,11 +137,15 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
     };
 
     if mutations.is_empty() {
-        tracker.replaying.store(false, std::sync::atomic::Ordering::Relaxed);
+        tracker
+            .replaying
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         return Ok(0);
     }
 
-    tracker.replaying.store(true, std::sync::atomic::Ordering::Relaxed);
+    tracker
+        .replaying
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 
     // 3. Process mutations in a transaction
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -146,21 +163,26 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
                 attributes = excluded.attributes"
         )?;
 
-        let mut delete_fact_stmt = tx.prepare_cached(
-            "DELETE FROM facts WHERE volume = ?1 AND file_id = ?2"
-        )?;
+        let mut delete_fact_stmt =
+            tx.prepare_cached("DELETE FROM facts WHERE volume = ?1 AND file_id = ?2")?;
 
         let mut update_fact_name_stmt = tx.prepare_cached(
-            "UPDATE facts SET name = ?3, parent_file_id = ?4 WHERE volume = ?1 AND file_id = ?2"
+            "UPDATE facts SET name = ?3, parent_file_id = ?4 WHERE volume = ?1 AND file_id = ?2",
         )?;
 
         for m in &mutations {
             match m.kind.as_str() {
                 "Created" | "Modified" => {
                     // UPSERT fact
-                    let mut size = if m.is_directory { 0 } else { m.size_delta.max(0) as u64 };
+                    let mut size = if m.is_directory {
+                        0
+                    } else {
+                        m.size_delta.max(0) as u64
+                    };
                     let mut attributes = 0u32;
-                    if let Some((real_size, real_attrs)) = platform_windows::get_file_info_by_id(volume, m.file_id) {
+                    if let Some((real_size, real_attrs)) =
+                        platform_windows::get_file_info_by_id(volume, m.file_id)
+                    {
                         if !m.is_directory {
                             size = real_size;
                         }
@@ -215,7 +237,7 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
             "INSERT INTO drain_state (volume, last_sequence)
              VALUES (?1, ?2)
              ON CONFLICT(volume) DO UPDATE SET last_sequence = excluded.last_sequence",
-             rusqlite::params![volume, last_sequence],
+            rusqlite::params![volume, last_sequence],
         )?;
     }
     tx.commit()?;
@@ -234,6 +256,8 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
     }
     let _ = crate::search::commit_search_index();
 
-    tracker.mutations_replayed.store(last_sequence as u64, std::sync::atomic::Ordering::Relaxed);
+    tracker
+        .mutations_replayed
+        .store(last_sequence as u64, std::sync::atomic::Ordering::Relaxed);
     Ok(mutations.len())
 }

@@ -1,5 +1,5 @@
-use serde::{Deserialize, Serialize};
 use serde::de::{self, Deserializer, Visitor};
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs;
 use std::path::PathBuf;
@@ -42,7 +42,10 @@ where
             E: de::Error,
         {
             if value < 0 {
-                return Err(de::Error::invalid_value(de::Unexpected::Signed(value), &self));
+                return Err(de::Error::invalid_value(
+                    de::Unexpected::Signed(value),
+                    &self,
+                ));
             }
             Ok(format!("{}d", value))
         }
@@ -109,7 +112,10 @@ pub fn parse_duration(s: &str) -> Result<chrono::Duration, String> {
     for c in s.chars() {
         if c.is_digit(10) {
             if !unit_str.is_empty() {
-                return Err(format!("Invalid duration format: digit found after unit in '{}'", s));
+                return Err(format!(
+                    "Invalid duration format: digit found after unit in '{}'",
+                    s
+                ));
             }
             num_str.push(c);
         } else {
@@ -118,10 +124,15 @@ pub fn parse_duration(s: &str) -> Result<chrono::Duration, String> {
     }
 
     if num_str.is_empty() {
-        return Err(format!("Invalid duration: missing numeric value in '{}'", s));
+        return Err(format!(
+            "Invalid duration: missing numeric value in '{}'",
+            s
+        ));
     }
 
-    let num = num_str.parse::<i64>().map_err(|_| format!("Invalid duration number in '{}'", s))?;
+    let num = num_str
+        .parse::<i64>()
+        .map_err(|_| format!("Invalid duration number in '{}'", s))?;
     let unit_str = unit_str.trim();
 
     let duration = match unit_str {
@@ -129,7 +140,12 @@ pub fn parse_duration(s: &str) -> Result<chrono::Duration, String> {
         "h" | "hour" | "hours" => chrono::Duration::hours(num),
         "m" | "month" | "months" => chrono::Duration::days(num * 30),
         "y" | "year" | "years" => chrono::Duration::days(num * 365),
-        _ => return Err(format!("Unknown duration unit: '{}' (supported: h, d, m, y)", unit_str)),
+        _ => {
+            return Err(format!(
+                "Unknown duration unit: '{}' (supported: h, d, m, y)",
+                unit_str
+            ))
+        }
     };
 
     let min_dur = chrono::Duration::hours(1);

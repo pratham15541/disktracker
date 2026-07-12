@@ -1,8 +1,8 @@
 use api::{JsonRpcRequest, JsonRpcResponse};
 use clap::{Parser, Subcommand};
 use core_types::{DaemonState, ProgressSnapshot, VolumeProgress};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use std::io::Write;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 const PIPE_PATH: &str = r"\\.\pipe\disktracker";
 
@@ -123,7 +123,6 @@ enum ConfigCommands {
         value: String,
     },
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -375,139 +374,161 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
-        Commands::Service { subcommand } => {
-            match subcommand {
-                ServiceCommands::Register => {
-                    #[cfg(windows)]
-                    {
-                        match platform_windows::register_service() {
-                            Ok(_) => println!("[Cli] Windows Service 'DiskTracker' registered successfully."),
-                            Err(e) => {
-                                eprintln!("[Cli] Error registering Windows Service: {:?}", e);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        println!("[Cli] Service commands are only supported on Windows.");
-                    }
-                }
-                ServiceCommands::Unregister => {
-                    #[cfg(windows)]
-                    {
-                        let _ = platform_windows::stop_service();
-                        match platform_windows::unregister_service() {
-                            Ok(_) => println!("[Cli] Windows Service 'DiskTracker' unregistered successfully."),
-                            Err(e) => {
-                                eprintln!("[Cli] Error unregistering Windows Service: {:?}", e);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        println!("[Cli] Service commands are only supported on Windows.");
-                    }
-                }
-                ServiceCommands::Start => {
-                    #[cfg(windows)]
-                    {
-                        match platform_windows::start_service() {
-                            Ok(_) => println!("[Cli] Windows Service 'DiskTracker' started successfully."),
-                            Err(e) => {
-                                eprintln!("[Cli] Error starting Windows Service: {:?}", e);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        println!("[Cli] Service commands are only supported on Windows.");
-                    }
-                }
-                ServiceCommands::Stop => {
-                    #[cfg(windows)]
-                    {
-                        match platform_windows::stop_service() {
-                            Ok(_) => println!("[Cli] Windows Service 'DiskTracker' stopped successfully."),
-                            Err(e) => {
-                                eprintln!("[Cli] Error stopping Windows Service: {:?}", e);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                    #[cfg(not(windows))]
-                    {
-                        println!("[Cli] Service commands are only supported on Windows.");
-                    }
-                }
-            }
-        }
-        Commands::Config { subcommand } => {
-            match subcommand {
-                ConfigCommands::Get { key } => {
-                    if key != "retention" && key != "retention-days" {
-                        let err_msg = "Invalid config key. Valid keys are: retention, retention-days";
-                        print_error(cli.json, "E_INVALID_PARAMS", err_msg, Some(serde_json::json!({ "valid_keys": ["retention", "retention-days"] })));
-                        std::process::exit(1);
-                    }
-                    
-                    let params = serde_json::json!({ "key": key });
-                    match query_rpc("config_get", params).await {
-                        Ok(resp) => {
-                            if let Some(err) = resp.error {
-                                print_error(cli.json, "E_INVALID_PARAMS", &err.message, None);
-                                std::process::exit(1);
-                            }
-                            if let Some(result) = resp.result {
-                                if cli.json {
-                                    println!("{}", serde_json::to_string_pretty(&result).unwrap());
-                                } else {
-                                    let val = result.get("value").and_then(|v| v.as_str()).unwrap_or("30d");
-                                    println!("{} = {}", key, val);
-                                }
-                            }
+        Commands::Service { subcommand } => match subcommand {
+            ServiceCommands::Register => {
+                #[cfg(windows)]
+                {
+                    match platform_windows::register_service() {
+                        Ok(_) => {
+                            println!("[Cli] Windows Service 'DiskTracker' registered successfully.")
                         }
                         Err(e) => {
-                            let err_msg = format!("Failed to connect to daemon: {}. Is the daemon running?", e);
-                            print_error(cli.json, "E_INVALID_PARAMS", &err_msg, None);
+                            eprintln!("[Cli] Error registering Windows Service: {:?}", e);
                             std::process::exit(1);
                         }
                     }
                 }
-                ConfigCommands::Set { key, value } => {
-                    if key != "retention" && key != "retention-days" {
-                        let err_msg = "Invalid config key. Valid keys are: retention, retention-days";
-                        print_error(cli.json, "E_INVALID_PARAMS", err_msg, Some(serde_json::json!({ "valid_keys": ["retention", "retention-days"] })));
-                        std::process::exit(1);
-                    }
-                    
-                    let params = serde_json::json!({ "key": key, "value": value });
-                    match query_rpc("config_set", params).await {
-                        Ok(resp) => {
-                            if let Some(err) = resp.error {
-                                print_error(cli.json, "E_INVALID_PARAMS", &err.message, None);
-                                std::process::exit(1);
-                            }
-                            if let Some(result) = resp.result {
-                                if cli.json {
-                                    println!("{}", serde_json::to_string_pretty(&result).unwrap());
-                                } else {
-                                    let val = result.get("value").and_then(|v| v.as_str()).unwrap_or("30d");
-                                    println!("Set {} to {}. Note: this change will take effect on the next scheduled run, not immediately.", key, val);
-                                }
-                            }
-                        }
+                #[cfg(not(windows))]
+                {
+                    println!("[Cli] Service commands are only supported on Windows.");
+                }
+            }
+            ServiceCommands::Unregister => {
+                #[cfg(windows)]
+                {
+                    let _ = platform_windows::stop_service();
+                    match platform_windows::unregister_service() {
+                        Ok(_) => println!(
+                            "[Cli] Windows Service 'DiskTracker' unregistered successfully."
+                        ),
                         Err(e) => {
-                            let err_msg = format!("Failed to connect to daemon: {}. Is the daemon running?", e);
-                            print_error(cli.json, "E_INVALID_PARAMS", &err_msg, None);
+                            eprintln!("[Cli] Error unregistering Windows Service: {:?}", e);
                             std::process::exit(1);
                         }
                     }
                 }
+                #[cfg(not(windows))]
+                {
+                    println!("[Cli] Service commands are only supported on Windows.");
+                }
             }
-        }
+            ServiceCommands::Start => {
+                #[cfg(windows)]
+                {
+                    match platform_windows::start_service() {
+                        Ok(_) => {
+                            println!("[Cli] Windows Service 'DiskTracker' started successfully.")
+                        }
+                        Err(e) => {
+                            eprintln!("[Cli] Error starting Windows Service: {:?}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    println!("[Cli] Service commands are only supported on Windows.");
+                }
+            }
+            ServiceCommands::Stop => {
+                #[cfg(windows)]
+                {
+                    match platform_windows::stop_service() {
+                        Ok(_) => {
+                            println!("[Cli] Windows Service 'DiskTracker' stopped successfully.")
+                        }
+                        Err(e) => {
+                            eprintln!("[Cli] Error stopping Windows Service: {:?}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                #[cfg(not(windows))]
+                {
+                    println!("[Cli] Service commands are only supported on Windows.");
+                }
+            }
+        },
+        Commands::Config { subcommand } => match subcommand {
+            ConfigCommands::Get { key } => {
+                if key != "retention" && key != "retention-days" {
+                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days";
+                    print_error(
+                        cli.json,
+                        "E_INVALID_PARAMS",
+                        err_msg,
+                        Some(serde_json::json!({ "valid_keys": ["retention", "retention-days"] })),
+                    );
+                    std::process::exit(1);
+                }
+
+                let params = serde_json::json!({ "key": key });
+                match query_rpc("config_get", params).await {
+                    Ok(resp) => {
+                        if let Some(err) = resp.error {
+                            print_error(cli.json, "E_INVALID_PARAMS", &err.message, None);
+                            std::process::exit(1);
+                        }
+                        if let Some(result) = resp.result {
+                            if cli.json {
+                                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                            } else {
+                                let val = result
+                                    .get("value")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("30d");
+                                println!("{} = {}", key, val);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg =
+                            format!("Failed to connect to daemon: {}. Is the daemon running?", e);
+                        print_error(cli.json, "E_INVALID_PARAMS", &err_msg, None);
+                        std::process::exit(1);
+                    }
+                }
+            }
+            ConfigCommands::Set { key, value } => {
+                if key != "retention" && key != "retention-days" {
+                    let err_msg = "Invalid config key. Valid keys are: retention, retention-days";
+                    print_error(
+                        cli.json,
+                        "E_INVALID_PARAMS",
+                        err_msg,
+                        Some(serde_json::json!({ "valid_keys": ["retention", "retention-days"] })),
+                    );
+                    std::process::exit(1);
+                }
+
+                let params = serde_json::json!({ "key": key, "value": value });
+                match query_rpc("config_set", params).await {
+                    Ok(resp) => {
+                        if let Some(err) = resp.error {
+                            print_error(cli.json, "E_INVALID_PARAMS", &err.message, None);
+                            std::process::exit(1);
+                        }
+                        if let Some(result) = resp.result {
+                            if cli.json {
+                                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                            } else {
+                                let val = result
+                                    .get("value")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("30d");
+                                println!("Set {} to {}. Note: this change will take effect on the next scheduled run, not immediately.", key, val);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let err_msg =
+                            format!("Failed to connect to daemon: {}. Is the daemon running?", e);
+                        print_error(cli.json, "E_INVALID_PARAMS", &err_msg, None);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        },
         Commands::Search {
             query,
             path,
@@ -569,22 +590,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(resp) => {
                         if let Some(err) = resp.error {
                             if let Some(ref data) = err.data {
-                                if data.get("code").and_then(|v| v.as_str()) == Some("E_SEARCH_INDEX_STALE") {
-                                    let initial_progress = data.get("progress").and_then(|v| v.as_u64()).unwrap_or(0);
+                                if data.get("code").and_then(|v| v.as_str())
+                                    == Some("E_SEARCH_INDEX_STALE")
+                                {
+                                    let initial_progress =
+                                        data.get("progress").and_then(|v| v.as_u64()).unwrap_or(0);
                                     if first_attempt {
-                                        print!("Building search index: {} files indexed...", initial_progress);
+                                        print!(
+                                            "Building search index: {} files indexed...",
+                                            initial_progress
+                                        );
                                         use std::io::Write;
                                         let _ = std::io::stdout().flush();
                                         first_attempt = false;
                                     }
-                                    
+
                                     loop {
-                                        let status_resp = query_rpc("get_search_rebuild_status", serde_json::json!({})).await;
+                                        let status_resp = query_rpc(
+                                            "get_search_rebuild_status",
+                                            serde_json::json!({}),
+                                        )
+                                        .await;
                                         match status_resp {
                                             Ok(status_val) => {
                                                 if let Some(res) = status_val.result {
-                                                    let in_progress = res.get("in_progress").and_then(|v| v.as_bool()).unwrap_or(false);
-                                                    let progress = res.get("progress").and_then(|v| v.as_u64()).unwrap_or(0);
+                                                    let in_progress = res
+                                                        .get("in_progress")
+                                                        .and_then(|v| v.as_bool())
+                                                        .unwrap_or(false);
+                                                    let progress = res
+                                                        .get("progress")
+                                                        .and_then(|v| v.as_u64())
+                                                        .unwrap_or(0);
                                                     print!("\rBuilding search index: {} files indexed...", progress);
                                                     let _ = std::io::stdout().flush();
                                                     if !in_progress {
@@ -594,10 +631,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 }
                                             }
                                             Err(_) => {
-                                                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                                tokio::time::sleep(
+                                                    std::time::Duration::from_millis(250),
+                                                )
+                                                .await;
                                             }
                                         }
-                                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                                        tokio::time::sleep(std::time::Duration::from_millis(250))
+                                            .await;
                                     }
                                     continue;
                                 }
@@ -608,30 +649,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         if let Some(result) = resp.result {
                             if *json {
-                                println!("{}", serde_json::to_string_pretty(&result.get("results").unwrap()).unwrap());
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&result.get("results").unwrap())
+                                        .unwrap()
+                                );
                             } else {
-                                let results = result.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-                                let volumes_incomplete = result.get("volumes_incomplete").and_then(|v| v.as_array())
-                                    .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect::<std::collections::HashSet<_>>())
+                                let results = result
+                                    .get("results")
+                                    .and_then(|v| v.as_array())
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let volumes_incomplete = result
+                                    .get("volumes_incomplete")
+                                    .and_then(|v| v.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                            .collect::<std::collections::HashSet<_>>()
+                                    })
                                     .unwrap_or_default();
 
                                 let mut shown_warnings = std::collections::HashSet::new();
                                 for item in &results {
                                     if let Some(vol) = item.get("volume").and_then(|v| v.as_str()) {
-                                        if volumes_incomplete.contains(vol) && shown_warnings.insert(vol.to_string()) {
+                                        if volumes_incomplete.contains(vol)
+                                            && shown_warnings.insert(vol.to_string())
+                                        {
                                             println!("⚠ Volume {} is currently scanning; results may be incomplete.", vol);
                                         }
                                     }
                                 }
 
-                                if let Some(last_mod_str) = result.get("last_db_modified").and_then(|v| v.as_str()) {
-                                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(last_mod_str) {
+                                if let Some(last_mod_str) =
+                                    result.get("last_db_modified").and_then(|v| v.as_str())
+                                {
+                                    if let Ok(dt) =
+                                        chrono::DateTime::parse_from_rfc3339(last_mod_str)
+                                    {
                                         let local_dt = dt.with_timezone(&chrono::Local);
-                                        println!("Database Last Modified: {}", local_dt.format("%Y-%m-%d %H:%M:%S"));
+                                        println!(
+                                            "Database Last Modified: {}",
+                                            local_dt.format("%Y-%m-%d %H:%M:%S")
+                                        );
                                     }
                                 }
 
-                                if result.get("index_rebuilding").and_then(|v| v.as_bool()).unwrap_or(false) {
+                                if result
+                                    .get("index_rebuilding")
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false)
+                                {
                                     println!("⚠ Search index is currently rebuilding in the background; results may be stale.");
                                 }
 
@@ -675,7 +743,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     max_mod: usize,
                                 ) {
                                     let vol_str = if is_root { &node.volume } else { "" };
-                                    
+
                                     let display_name = if node.is_match {
                                         node.name.clone()
                                     } else {
@@ -685,7 +753,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let tree_line = if is_root {
                                         format!("{}\\", node.name)
                                     } else {
-                                        format!("{}{}{}", prefix, if is_last { "└── " } else { "├── " }, display_name)
+                                        format!(
+                                            "{}{}{}",
+                                            prefix,
+                                            if is_last { "└── " } else { "├── " },
+                                            display_name
+                                        )
                                     };
 
                                     // Print tabular metadata + tree path
@@ -706,9 +779,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let new_prefix = if is_root {
                                             "".to_string()
                                         } else {
-                                            format!("{}{}", prefix, if is_last { "    " } else { "│   " })
+                                            format!(
+                                                "{}{}",
+                                                prefix,
+                                                if is_last { "    " } else { "│   " }
+                                            )
                                         };
-                                        print_tree_node(child, &new_prefix, is_last_child, false, max_vol, max_attrs, max_size, max_mod);
+                                        print_tree_node(
+                                            child,
+                                            &new_prefix,
+                                            is_last_child,
+                                            false,
+                                            max_vol,
+                                            max_attrs,
+                                            max_size,
+                                            max_mod,
+                                        );
                                     }
                                 }
 
@@ -717,59 +803,94 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let mut max_size = 8;
                                 let mut max_mod = 19;
 
-                                let mut roots: std::collections::BTreeMap<String, TreeNode> = std::collections::BTreeMap::new();
+                                let mut roots: std::collections::BTreeMap<String, TreeNode> =
+                                    std::collections::BTreeMap::new();
 
                                 for item in &results {
-                                    let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
-                                    let path = item.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                    let vol =
+                                        item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
+                                    let path =
+                                        item.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                                    let name =
+                                        item.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
-                                    let attrs_arr = item.get("attributes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+                                    let attrs_arr = item
+                                        .get("attributes")
+                                        .and_then(|v| v.as_array())
+                                        .cloned()
+                                        .unwrap_or_default();
                                     let mut attr_flags = String::new();
-                                    let attr_strs: Vec<&str> = attrs_arr.iter().filter_map(|v| v.as_str()).collect();
-                                    if attr_strs.contains(&"readonly") { attr_flags.push('R'); }
-                                    if attr_strs.contains(&"hidden") { attr_flags.push('H'); }
-                                    if attr_strs.contains(&"system") { attr_flags.push('S'); }
-                                    if attr_strs.contains(&"archive") { attr_flags.push('A'); }
-                                    if attr_strs.contains(&"reparse") { attr_flags.push('L'); }
+                                    let attr_strs: Vec<&str> =
+                                        attrs_arr.iter().filter_map(|v| v.as_str()).collect();
+                                    if attr_strs.contains(&"readonly") {
+                                        attr_flags.push('R');
+                                    }
+                                    if attr_strs.contains(&"hidden") {
+                                        attr_flags.push('H');
+                                    }
+                                    if attr_strs.contains(&"system") {
+                                        attr_flags.push('S');
+                                    }
+                                    if attr_strs.contains(&"archive") {
+                                        attr_flags.push('A');
+                                    }
+                                    if attr_strs.contains(&"reparse") {
+                                        attr_flags.push('L');
+                                    }
                                     if attr_flags.is_empty() {
                                         attr_flags = "-".to_string();
                                     }
 
-                                    let size_val = item.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    let is_dir = item.get("is_directory").and_then(|v| v.as_bool()).unwrap_or(false);
+                                    let size_val =
+                                        item.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let is_dir = item
+                                        .get("is_directory")
+                                        .and_then(|v| v.as_bool())
+                                        .unwrap_or(false);
                                     let size_str = if is_dir {
                                         "<DIR>".to_string()
                                     } else {
                                         format_size(size_val)
                                     };
 
-                                    let mod_time = item.get("modified_at").and_then(|v| v.as_i64()).unwrap_or(0);
-                                    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(mod_time, 0)
-                                        .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
-                                        .unwrap_or_else(|| "-".to_string());
+                                    let mod_time = item
+                                        .get("modified_at")
+                                        .and_then(|v| v.as_i64())
+                                        .unwrap_or(0);
+                                    let dt = chrono::DateTime::<chrono::Utc>::from_timestamp(
+                                        mod_time, 0,
+                                    )
+                                    .map(|d| d.format("%Y-%m-%d %H:%M:%S").to_string())
+                                    .unwrap_or_else(|| "-".to_string());
 
                                     max_vol = max_vol.max(vol.len());
                                     max_attrs = max_attrs.max(attr_flags.len());
                                     max_size = max_size.max(size_str.len());
                                     max_mod = max_mod.max(dt.len());
 
-                                    let root_node = roots.entry(vol.to_string()).or_insert_with(|| {
-                                        let mut r = TreeNode::new(vol);
-                                        r.volume = vol.to_string();
-                                        r
-                                    });
+                                    let root_node =
+                                        roots.entry(vol.to_string()).or_insert_with(|| {
+                                            let mut r = TreeNode::new(vol);
+                                            r.volume = vol.to_string();
+                                            r
+                                        });
 
                                     let mut curr = root_node;
                                     if !path.is_empty() {
                                         for segment in path.split('/') {
                                             if !segment.is_empty() {
-                                                curr = curr.children.entry(segment.to_string()).or_insert_with(|| TreeNode::new(segment));
+                                                curr = curr
+                                                    .children
+                                                    .entry(segment.to_string())
+                                                    .or_insert_with(|| TreeNode::new(segment));
                                             }
                                         }
                                     }
 
-                                    let leaf = curr.children.entry(name.to_string()).or_insert_with(|| TreeNode::new(name));
+                                    let leaf = curr
+                                        .children
+                                        .entry(name.to_string())
+                                        .or_insert_with(|| TreeNode::new(name));
                                     leaf.is_match = true;
                                     leaf.volume = vol.to_string();
                                     leaf.attributes = attr_flags;
@@ -795,7 +916,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
 
                                 for (_, root_node) in &roots {
-                                    print_tree_node(root_node, "", false, true, max_vol, max_attrs, max_size, max_mod);
+                                    print_tree_node(
+                                        root_node, "", false, true, max_vol, max_attrs, max_size,
+                                        max_mod,
+                                    );
                                 }
                             }
                         }
@@ -810,11 +934,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-
     Ok(())
 }
 
-async fn query_rpc(method: &str, params: serde_json::Value) -> Result<JsonRpcResponse, Box<dyn std::error::Error>> {
+async fn query_rpc(
+    method: &str,
+    params: serde_json::Value,
+) -> Result<JsonRpcResponse, Box<dyn std::error::Error>> {
     let mut stream = platform_windows::connect_client(PIPE_PATH).await?;
 
     let request = JsonRpcRequest {
@@ -895,7 +1021,10 @@ async fn run_doctor() {
                     if status == "ok" {
                         println!("  [OK] SQLite database integrity");
                     } else {
-                        println!("  [FAIL] SQLite database integrity check returned: {}", status);
+                        println!(
+                            "  [FAIL] SQLite database integrity check returned: {}",
+                            status
+                        );
                         all_ok = false;
                     }
                 } else {
@@ -903,7 +1032,10 @@ async fn run_doctor() {
                     all_ok = false;
                 }
             } else if let Some(err) = resp.error {
-                println!("  [FAIL] SQLite database integrity: Daemon error: {}", err.message);
+                println!(
+                    "  [FAIL] SQLite database integrity: Daemon error: {}",
+                    err.message
+                );
                 all_ok = false;
             }
         }
@@ -930,7 +1062,11 @@ async fn run_doctor() {
                 }
             }
             if usn_ok {
-                println!("  [OK] USN Journal availability (Verified {} volumes: {:?})", volumes.len(), volumes);
+                println!(
+                    "  [OK] USN Journal availability (Verified {} volumes: {:?})",
+                    volumes.len(),
+                    volumes
+                );
             }
         }
     }
@@ -953,8 +1089,12 @@ async fn run_doctor() {
                             let volume = item.get("volume").and_then(|v| v.as_str()).unwrap_or("?");
                             let status = item.get("status").and_then(|s| s.as_str()).unwrap_or("?");
                             let run_at = item.get("run_at").and_then(|r| r.as_str()).unwrap_or("?");
-                            let details = item.get("details").and_then(|d| d.as_str()).unwrap_or("?");
-                            println!("      - Volume {}: [{}] at {} ({})", volume, status, run_at, details);
+                            let details =
+                                item.get("details").and_then(|d| d.as_str()).unwrap_or("?");
+                            println!(
+                                "      - Volume {}: [{}] at {} ({})",
+                                volume, status, run_at, details
+                            );
                         }
                     }
                 } else {
@@ -967,7 +1107,10 @@ async fn run_doctor() {
             }
         }
         Err(e) => {
-            println!("  [FAIL] Pruning Log check: Failed to retrieve pruning logs via daemon: {:?}", e);
+            println!(
+                "  [FAIL] Pruning Log check: Failed to retrieve pruning logs via daemon: {:?}",
+                e
+            );
             all_ok = false;
         }
     }
@@ -984,7 +1127,7 @@ async fn run_uninstall() -> Result<(), Box<dyn std::error::Error>> {
     print!("Are you sure you want to stop the daemon and delete all database files? [y/N]: ");
     use std::io::Write;
     std::io::stdout().flush()?;
-    
+
     let mut input = String::new();
     std::io::stdin().read_line(&mut input)?;
     let input = input.trim().to_lowercase();
@@ -1028,7 +1171,10 @@ async fn run_uninstall() -> Result<(), Box<dyn std::error::Error>> {
         match platform_windows::unregister_service() {
             Ok(_) => println!("  [OK] Windows Service stopped and unregistered successfully."),
             Err(e) => {
-                println!("  [INFO] No active Windows Service to unregister (or: {:?})", e);
+                println!(
+                    "  [INFO] No active Windows Service to unregister (or: {:?})",
+                    e
+                );
             }
         }
     }
@@ -1036,7 +1182,10 @@ async fn run_uninstall() -> Result<(), Box<dyn std::error::Error>> {
     // 3. Delete SQLite database files and AppData folder
     let db_dir = storage::get_db_dir()?;
     if db_dir.exists() {
-        println!("[Cli] Deleting database files and directory at {:?}...", db_dir);
+        println!(
+            "[Cli] Deleting database files and directory at {:?}...",
+            db_dir
+        );
         let mut retries = 5;
         loop {
             match std::fs::remove_dir_all(&db_dir) {
@@ -1064,7 +1213,10 @@ async fn run_uninstall() -> Result<(), Box<dyn std::error::Error>> {
     {
         let socket_path = "/tmp/disktracker.sock";
         if std::path::Path::new(socket_path).exists() {
-            println!("[Cli] (Unix Fallback) Deleting socket file at {}...", socket_path);
+            println!(
+                "[Cli] (Unix Fallback) Deleting socket file at {}...",
+                socket_path
+            );
             let _ = std::fs::remove_file(socket_path);
             println!("  [OK] Socket file deleted.");
         }
@@ -1074,7 +1226,10 @@ async fn run_uninstall() -> Result<(), Box<dyn std::error::Error>> {
         for vol in volumes {
             let mock_path = format!("/tmp/disktracker_mock_{}", vol);
             if std::path::Path::new(&mock_path).exists() {
-                println!("[Cli] (Unix Fallback) Deleting mock folder at {}...", mock_path);
+                println!(
+                    "[Cli] (Unix Fallback) Deleting mock folder at {}...",
+                    mock_path
+                );
                 let _ = std::fs::remove_dir_all(&mock_path);
             }
         }
@@ -1117,7 +1272,9 @@ fn parse_modified_time(s: &str) -> Result<chrono::DateTime<chrono::Utc>, String>
         return Err(format!("Invalid datetime/duration format: '{}'", s));
     }
 
-    let num: i64 = num_str.parse().map_err(|_| format!("Invalid number in '{}'", s))?;
+    let num: i64 = num_str
+        .parse()
+        .map_err(|_| format!("Invalid number in '{}'", s))?;
     let now = chrono::Utc::now();
     let duration = match unit_str.as_str() {
         "h" | "hr" | "hour" | "hours" => chrono::Duration::hours(num),
@@ -1148,4 +1305,3 @@ fn format_size(bytes: u64) -> String {
         format!("{} B", bytes)
     }
 }
-
