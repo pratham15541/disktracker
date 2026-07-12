@@ -1,5 +1,6 @@
 mod drain;
 pub mod search;
+pub mod history;
 use tantivy::schema::Value;
 
 use core_types::{
@@ -531,6 +532,57 @@ async fn handle_request(
                 -32603,
                 format!("Failed to connect to database: {}", e),
             ),
+        },
+        "get_history" => {
+            let path = match req.params.get("path").and_then(|p| p.as_str()) {
+                Some(p) => p,
+                None => {
+                    return JsonRpcResponse::error_with_data(
+                        req.id,
+                        -32602,
+                        "Path is required".to_string(),
+                        Some(serde_json::json!({
+                            "code": "E_INVALID_PARAMS"
+                        }))
+                    );
+                }
+            };
+            let since = req.params.get("since").and_then(|t| t.as_i64());
+            let until = req.params.get("until").and_then(|t| t.as_i64());
+            let kind = req.params.get("kind").and_then(|k| k.as_str());
+            let collapse = req.params.get("collapse").and_then(|c| c.as_bool()).unwrap_or(false);
+            let limit = req.params.get("limit").and_then(|l| l.as_u64()).unwrap_or(100) as usize;
+            let cursor = req.params.get("cursor").and_then(|c| c.as_str());
+
+            match storage::get_db_connection() {
+                Ok(conn) => {
+                    match history::get_history(&conn, path, since, until, kind, collapse, limit, cursor) {
+                        Ok(resp) => {
+                            JsonRpcResponse::success(req.id, serde_json::json!(resp))
+                        }
+                        Err(e) => {
+                            if e.contains("not found") || e.contains("component") {
+                                JsonRpcResponse::error_with_data(
+                                    req.id,
+                                    -32002,
+                                    format!("Couldn't find \"{}\". Check the path and try again.", path),
+                                    Some(serde_json::json!({
+                                        "code": "E_NOT_FOUND",
+                                        "input": path
+                                    }))
+                                )
+                            } else {
+                                JsonRpcResponse::error(req.id, -32603, e)
+                            }
+                        }
+                    }
+                }
+                Err(e) => JsonRpcResponse::error(
+                    req.id,
+                    -32603,
+                    format!("Failed to connect to database: {}", e),
+                ),
+            }
         },
         "search_query" => {
             if search::REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst) {

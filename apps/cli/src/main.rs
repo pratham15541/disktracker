@@ -87,6 +87,36 @@ enum Commands {
         #[arg(long)]
         verbose: bool,
     },
+    /// View the mutation history of a specific file or directory
+    History {
+        /// The path of the file or directory to query history for (defaults to current directory)
+        #[arg(index = 1)]
+        path: Option<String>,
+        /// Filter history since a duration (e.g. 2d, 1h) or UTC datetime (RFC3339)
+        #[arg(long)]
+        since: Option<String>,
+        /// Filter history until a duration (e.g. 2d, 1h) or UTC datetime (RFC3339)
+        #[arg(long)]
+        until: Option<String>,
+        /// Filter by mutation kind (created, modified, deleted, renamed)
+        #[arg(long)]
+        kind: Option<String>,
+        /// Collapse consecutive same-kind entries
+        #[arg(long)]
+        collapse: bool,
+        /// Max number of history entries to return
+        #[arg(long, default_value = "100")]
+        limit: usize,
+        /// Cursor for pagination
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Output the results in JSON format
+        #[arg(long)]
+        json: bool,
+        /// Show verbose output
+        #[arg(long)]
+        verbose: bool,
+    },
     /// Internal subcommand to start the IPC daemon server
     #[command(hide = true)]
     Daemon {
@@ -932,6 +962,262 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::History {
+            path,
+            since,
+            until,
+            kind,
+            collapse,
+            limit,
+            cursor,
+            json,
+            verbose,
+        } => {
+            let resolved_path = match path {
+                Some(p) => {
+                    let p_buf = std::path::Path::new(p);
+                    if p_buf.is_absolute() {
+                        p.clone()
+                    } else {
+                        match std::env::current_dir() {
+                            Ok(cwd) => cwd.join(p_buf).to_string_lossy().to_string(),
+                            Err(_) => p.clone(),
+                        }
+                    }
+                }
+                None => match std::env::current_dir() {
+                    Ok(pb) => pb.to_string_lossy().to_string(),
+                    Err(e) => {
+                        eprintln!("Error getting current directory: {}", e);
+                        std::process::exit(1);
+                    }
+                },
+            };
+
+            let since_ts = if let Some(ref s) = since {
+                match parse_modified_time(s) {
+                    Ok(dt) => Some(dt.timestamp()),
+                    Err(e) => {
+                        eprintln!("Error parsing since: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                None
+            };
+
+            let until_ts = if let Some(ref s) = until {
+                match parse_modified_time(s) {
+                    Ok(dt) => Some(dt.timestamp()),
+                    Err(e) => {
+                        eprintln!("Error parsing until: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                None
+            };
+
+            let params = serde_json::json!({
+                "path": resolved_path,
+                "since": since_ts,
+                "until": until_ts,
+                "kind": kind,
+                "collapse": collapse,
+                "limit": limit,
+                "cursor": cursor,
+            });
+
+            match query_rpc("get_history", params).await {
+                Ok(resp) => {
+                    if let Some(err) = resp.error {
+                        let code_owned = err.data.as_ref()
+                            .and_then(|d| d.get("code"))
+                            .and_then(|c| c.as_str())
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| "E_INVALID_PARAMS".to_string());
+                        print_error(*json, &code_owned, &err.message, err.data);
+                        std::process::exit(1);
+                    }
+
+                    if let Some(result) = resp.result {
+                        let results = result
+                            .get("results")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        let truncated = result
+                            .get("truncated")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        let next_cursor = result
+                            .get("cursor")
+                            .and_then(|v| v.as_str());
+
+                        if *json {
+                            println!("{}", serde_json::to_string_pretty(&results).unwrap());
+                        } else {
+                            if truncated {
+                                println!("⚠ Note: History is truncated. Some older entries may have been pruned according to the retention policy.");
+                            }
+
+                            if results.is_empty() {
+                                println!("No history found for: {}", resolved_path);
+                                if let Some(debug) = result.get("debug_info").and_then(|v| v.as_str()) {
+                                    println!("Debug Info: {}", debug);
+                                }
+                                return Ok(());
+                            }
+
+                            // Dynamic formatting
+                            let mut max_vol = 6;
+                            let mut max_kind = 8;
+                            let mut max_size = 10;
+                            let mut max_date = 15;
+                            let mut max_name = 15;
+
+                            let mut local_relative_times = Vec::new();
+                            let mut local_absolute_times = Vec::new();
+                            let mut size_deltas = Vec::new();
+
+                            for item in &results {
+                                let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
+                                let kind_str = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                let size_val = item.get("size_delta").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let at_str = item.get("at").and_then(|v| v.as_str()).unwrap_or("");
+                                let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+
+                                let r_time = format_relative_time(at_str);
+                                let a_time = format_absolute_time(at_str);
+                                let size_str = format_size_delta(size_val);
+
+                                max_vol = max_vol.max(vol.len());
+                                max_kind = max_kind.max(kind_str.len());
+                                max_size = max_size.max(size_str.len());
+                                max_date = max_date.max(if *verbose { a_time.len() } else { r_time.len() });
+                                max_name = max_name.max(name.len());
+
+                                local_relative_times.push(r_time);
+                                local_absolute_times.push(a_time);
+                                size_deltas.push(size_str);
+                            }
+
+                            if *verbose {
+                                let mut max_seq = 3;
+                                for item in &results {
+                                    let seq = item.get("sequence").and_then(|v| v.as_i64()).unwrap_or(0).to_string();
+                                    max_seq = max_seq.max(seq.len());
+                                }
+                                println!(
+                                    "{:<width_seq$} | {:<width_date$} | {:<width_kind$} | {:>width_size$} | {:<width_name$} | Details",
+                                    "Seq", "Date", "Kind", "Size Delta", "Name",
+                                    width_seq = max_seq,
+                                    width_date = max_date,
+                                    width_kind = max_kind,
+                                    width_size = max_size,
+                                    width_name = max_name
+                                );
+                                println!(
+                                    "{}",
+                                    "-".repeat(max_seq + max_date + max_kind + max_size + max_name + 18)
+                                );
+                                let mut prev_names = std::collections::HashMap::new();
+                                for (i, item) in results.iter().enumerate() {
+                                    let seq = item.get("sequence").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    let date_str = &local_absolute_times[i];
+                                    let kind_str = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                    let size_str = &size_deltas[i];
+                                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                    let file_id = item.get("file_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let parent_id = item.get("parent_file_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("");
+
+                                    let mut details_parts = Vec::new();
+                                    if kind_str.eq_ignore_ascii_case("renamed") {
+                                        if let Some(old_name) = prev_names.get(&file_id) {
+                                            details_parts.push(format!("Renamed from {}", old_name));
+                                        } else {
+                                            details_parts.push("Renamed".to_string());
+                                        }
+                                    }
+                                    details_parts.push(format!("Parent: {}", parent_id));
+                                    details_parts.push(format!("Source: {}", source));
+
+                                    println!(
+                                        "{:<width_seq$} | {:<width_date$} | {:<width_kind$} | {:>width_size$} | {:<width_name$} | {}",
+                                        seq, date_str, kind_str, size_str, name, details_parts.join(", "),
+                                        width_seq = max_seq,
+                                        width_date = max_date,
+                                        width_kind = max_kind,
+                                        width_size = max_size,
+                                        width_name = max_name
+                                    );
+                                    prev_names.insert(file_id, name.to_string());
+                                }
+                            } else {
+                                println!(
+                                    "{:<width_vol$} | {:<width_kind$} | {:>width_size$} | {:<width_date$} | {:<width_name$} | Details",
+                                    "Volume", "Kind", "Size Delta", "Date", "Name",
+                                    width_vol = max_vol,
+                                    width_kind = max_kind,
+                                    width_size = max_size,
+                                    width_date = max_date,
+                                    width_name = max_name
+                                );
+                                println!(
+                                    "{}",
+                                    "-".repeat(max_vol + max_kind + max_size + max_date + max_name + 18)
+                                );
+                                let mut prev_names = std::collections::HashMap::new();
+                                for (i, item) in results.iter().enumerate() {
+                                    let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
+                                    let kind_str = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                    let size_str = &size_deltas[i];
+                                    let date_str = &local_relative_times[i];
+                                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                    let file_id = item.get("file_id").and_then(|v| v.as_u64()).unwrap_or(0);
+
+                                    let mut details = String::new();
+                                    if kind_str.eq_ignore_ascii_case("renamed") {
+                                        if let Some(old_name) = prev_names.get(&file_id) {
+                                            details = format!("Renamed from {}", old_name);
+                                        } else {
+                                            details = "Renamed".to_string();
+                                        }
+                                    }
+
+                                    println!(
+                                        "{:<width_vol$} | {:<width_kind$} | {:>width_size$} | {:<width_date$} | {:<width_name$} | {}",
+                                        vol, kind_str, size_str, date_str, name, details,
+                                        width_vol = max_vol,
+                                        width_kind = max_kind,
+                                        width_size = max_size,
+                                        width_date = max_date,
+                                        width_name = max_name
+                                    );
+                                    prev_names.insert(file_id, name.to_string());
+                                }
+                            }
+
+                            if let Some(c) = next_cursor {
+                                println!("\nNext page cursor: {}", c);
+                            }
+
+                            if *verbose {
+                                if let Some(debug) = result.get("debug_info").and_then(|v| v.as_str()) {
+                                    println!("\nDebug Info: {}", debug);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let err_msg = format!("Failed to query history: {}", e);
+                    print_error(*json, "E_INVALID_PARAMS", &err_msg, None);
+                    std::process::exit(1);
+                }
+            }
+        }
     }
 
     Ok(())
@@ -1303,5 +1589,44 @@ fn format_size(bytes: u64) -> String {
         format!("{:.2} KB", bytes as f64 / KB as f64)
     } else {
         format!("{} B", bytes)
+    }
+}
+
+fn format_relative_time(at_rfc3339: &str) -> String {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(at_rfc3339) {
+        let now = chrono::Utc::now();
+        let diff = now.signed_duration_since(dt.with_timezone(&chrono::Utc));
+        if diff.num_seconds() < 0 {
+            "just now".to_string()
+        } else if diff.num_seconds() < 60 {
+            "just now".to_string()
+        } else if diff.num_minutes() < 60 {
+            format!("{}m ago", diff.num_minutes())
+        } else if diff.num_hours() < 24 {
+            format!("{}h ago", diff.num_hours())
+        } else {
+            format!("{}d ago", diff.num_days())
+        }
+    } else {
+        at_rfc3339.to_string()
+    }
+}
+
+fn format_absolute_time(at_rfc3339: &str) -> String {
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(at_rfc3339) {
+        let local_dt = dt.with_timezone(&chrono::Local);
+        local_dt.format("%Y-%m-%d %H:%M:%S").to_string()
+    } else {
+        at_rfc3339.to_string()
+    }
+}
+
+fn format_size_delta(bytes: i64) -> String {
+    if bytes > 0 {
+        format!("+{}", format_size(bytes as u64))
+    } else if bytes < 0 {
+        format!("-{}", format_size((-bytes) as u64))
+    } else {
+        "0 B".to_string()
     }
 }

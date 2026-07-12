@@ -5,7 +5,7 @@ edition = "2021"
 
 [dependencies]
 platform-traits = { path = "../traits" }
-tokio = { version = "1.0", features = ["rt", "net", "io-util", "sync", "signal"] }
+tokio = { version = "1.0", features = ["rt", "net", "io-util", "sync", "signal", "time", "rt-multi-thread"] }
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Ioctl", "Win32_System_Threading", "Win32_System_Services"] }
 storage = { path = "../../storage" }
 rusqlite = { version = "0.31", features = ["bundled"] }
