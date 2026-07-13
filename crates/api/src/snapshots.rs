@@ -1,11 +1,15 @@
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use crate::search;
+use chrono::{DateTime, Utc};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use rusqlite::Connection;
-use chrono::{DateTime, Utc};
-use storage::{ParentSnapshotEntry, VolumeSnapshotEntry, get_db_connection, check_parent_snapshot_label_exists, get_parent_snapshot_by_label_or_id, list_parent_snapshots_db, create_parent_snapshot_db, create_volume_snapshot_db};
-use crate::search;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use storage::{
+    check_parent_snapshot_label_exists, create_parent_snapshot_db, create_volume_snapshot_db,
+    get_db_connection, get_parent_snapshot_by_label_or_id, list_parent_snapshots_db,
+    ParentSnapshotEntry, VolumeSnapshotEntry,
+};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Job {
@@ -72,7 +76,10 @@ pub fn handle_snapshot_create(params: Value) -> Result<Value, String> {
         }
     }
 
-    let label_opt = params.get("label").and_then(|l| l.as_str()).map(|s| s.trim().to_string());
+    let label_opt = params
+        .get("label")
+        .and_then(|l| l.as_str())
+        .map(|s| s.trim().to_string());
 
     if let Some(ref label) = label_opt {
         if label.is_empty() {
@@ -90,13 +97,16 @@ pub fn handle_snapshot_create(params: Value) -> Result<Value, String> {
     let job_id = generate_random_id("job");
     {
         let mut jobs = get_jobs().lock().unwrap();
-        jobs.insert(job_id.clone(), Job {
-            id: job_id.clone(),
-            completed: false,
-            progress: 0,
-            result: None,
-            error: None,
-        });
+        jobs.insert(
+            job_id.clone(),
+            Job {
+                id: job_id.clone(),
+                completed: false,
+                progress: 0,
+                result: None,
+                error: None,
+            },
+        );
     }
 
     let job_id_clone = job_id.clone();
@@ -105,7 +115,7 @@ pub fn handle_snapshot_create(params: Value) -> Result<Value, String> {
     tokio::spawn(async move {
         let res = tokio::task::spawn_blocking(move || -> Result<ParentSnapshotEntry, String> {
             let conn = get_db_connection().map_err(|e| e.to_string())?;
-            
+
             let parent_id = generate_random_id("parent");
             let final_label = label_clone.unwrap_or_else(|| {
                 let local_time = chrono::Local::now();
@@ -117,37 +127,31 @@ pub fn handle_snapshot_create(params: Value) -> Result<Value, String> {
             let config = config_mgr::load_config();
             let retention = config.retention.clone();
 
-            create_parent_snapshot_db(
-                &parent_id,
-                &final_label,
-                daemon_ver,
-                schema_ver,
-                &retention,
-            ).map_err(|e| e.to_string())?;
+            create_parent_snapshot_db(&parent_id, &final_label, daemon_ver, schema_ver, &retention)
+                .map_err(|e| e.to_string())?;
 
             let mut child_entries = Vec::new();
             for volume in &volumes_clone {
-                let seq: i64 = conn.query_row(
-                    "SELECT COALESCE(MAX(sequence), 0) FROM mutation_log WHERE volume = ?1",
-                    rusqlite::params![volume],
-                    |row| row.get(0)
-                ).unwrap_or(0);
+                let seq: i64 = conn
+                    .query_row(
+                        "SELECT COALESCE(MAX(sequence), 0) FROM mutation_log WHERE volume = ?1",
+                        rusqlite::params![volume],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
 
-                let count: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM facts WHERE volume = ?1",
-                    rusqlite::params![volume],
-                    |row| row.get(0)
-                ).unwrap_or(0);
+                let count: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM facts WHERE volume = ?1",
+                        rusqlite::params![volume],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
 
                 let child_id = generate_random_id("snap");
 
-                create_volume_snapshot_db(
-                    &child_id,
-                    &parent_id,
-                    volume,
-                    seq,
-                    count,
-                ).map_err(|e| e.to_string())?;
+                create_volume_snapshot_db(&child_id, &parent_id, volume, seq, count)
+                    .map_err(|e| e.to_string())?;
 
                 child_entries.push(VolumeSnapshotEntry {
                     id: child_id,
@@ -167,7 +171,8 @@ pub fn handle_snapshot_create(params: Value) -> Result<Value, String> {
                 retention_setting: retention,
                 volumes: child_entries,
             })
-        }).await;
+        })
+        .await;
 
         let mut jobs = get_jobs().lock().unwrap();
         if let Some(job) = jobs.get_mut(&job_id_clone) {
@@ -193,10 +198,10 @@ pub fn handle_snapshot_create(params: Value) -> Result<Value, String> {
 pub fn trigger_auto_snapshot_for_all_volumes() -> Result<(), String> {
     let conn = storage::get_db_connection().map_err(|e| e.to_string())?;
     let volumes = core_types::get_registered_volumes();
-    
+
     let now_local = chrono::Local::now();
     let label = format!("auto_{}", now_local.format("%Y-%m-%d_%H-%M-%S"));
-    
+
     let daemon_ver = env!("CARGO_PKG_VERSION");
     let schema_ver = 2i64;
     let config = config_mgr::load_config();
@@ -205,49 +210,48 @@ pub fn trigger_auto_snapshot_for_all_volumes() -> Result<(), String> {
     let parent_id = generate_random_id("parent");
 
     // Insert parent snapshot record
-    storage::create_parent_snapshot_db(
-        &parent_id,
-        &label,
-        daemon_ver,
-        schema_ver,
-        &retention,
-    ).map_err(|e| e.to_string())?;
+    storage::create_parent_snapshot_db(&parent_id, &label, daemon_ver, schema_ver, &retention)
+        .map_err(|e| e.to_string())?;
 
     for volume in &volumes {
-        let seq: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(sequence), 0) FROM mutation_log WHERE volume = ?1",
-            rusqlite::params![volume],
-            |row| row.get(0)
-        ).unwrap_or(0);
+        let seq: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(sequence), 0) FROM mutation_log WHERE volume = ?1",
+                rusqlite::params![volume],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
 
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM facts WHERE volume = ?1",
-            rusqlite::params![volume],
-            |row| row.get(0)
-        ).unwrap_or(0);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE volume = ?1",
+                rusqlite::params![volume],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
 
         let child_id = generate_random_id("snap");
 
-        storage::create_volume_snapshot_db(
-            &child_id,
-            &parent_id,
-            volume,
-            seq,
-            count,
-        ).map_err(|e| e.to_string())?;
-        
-        println!("[Auto-Snapshot] Created snapshot \"{}\" for volume {} (id: {})", label, volume, child_id);
+        storage::create_volume_snapshot_db(&child_id, &parent_id, volume, seq, count)
+            .map_err(|e| e.to_string())?;
+
+        println!(
+            "[Auto-Snapshot] Created snapshot \"{}\" for volume {} (id: {})",
+            label, volume, child_id
+        );
     }
     Ok(())
 }
 
 pub fn get_last_auto_snapshot_time() -> Option<chrono::DateTime<chrono::Utc>> {
     let conn = storage::get_db_connection().ok()?;
-    let time_str: String = conn.query_row(
-        "SELECT MAX(created_at) FROM parent_snapshots WHERE label LIKE 'auto_%'",
-        [],
-        |row| row.get(0)
-    ).ok()?;
+    let time_str: String = conn
+        .query_row(
+            "SELECT MAX(created_at) FROM parent_snapshots WHERE label LIKE 'auto_%'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
     chrono::DateTime::parse_from_rfc3339(&time_str)
         .map(|dt| dt.with_timezone(&chrono::Utc))
         .ok()
@@ -255,7 +259,10 @@ pub fn get_last_auto_snapshot_time() -> Option<chrono::DateTime<chrono::Utc>> {
 
 /// JSON-RPC: job.completed
 pub fn handle_job_completed(params: Value) -> Result<Value, String> {
-    let job_id = params.get("job_id").and_then(|j| j.as_str()).ok_or("Missing job_id parameter")?;
+    let job_id = params
+        .get("job_id")
+        .and_then(|j| j.as_str())
+        .ok_or("Missing job_id parameter")?;
     let jobs = get_jobs().lock().unwrap();
     if let Some(job) = jobs.get(job_id) {
         Ok(serde_json::to_value(job).unwrap())
@@ -266,11 +273,13 @@ pub fn handle_job_completed(params: Value) -> Result<Value, String> {
 
 /// JSON-RPC: snapshot_list
 pub fn handle_snapshot_list(params: Value) -> Result<Value, String> {
-    let volume = params.get("volume").and_then(|v| v.as_str()).map(|s| s.to_uppercase());
+    let volume = params
+        .get("volume")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_uppercase());
     let limit = params.get("limit").and_then(|l| l.as_u64()).unwrap_or(20) as usize;
 
-    let list = list_parent_snapshots_db(volume.as_deref(), limit)
-        .map_err(|e| e.to_string())?;
+    let list = list_parent_snapshots_db(volume.as_deref(), limit).map_err(|e| e.to_string())?;
 
     Ok(serde_json::json!({
         "results": list
@@ -333,20 +342,42 @@ fn resolve_diff_file_path(
 
 /// JSON-RPC: snapshot_diff
 pub fn handle_snapshot_diff(params: Value) -> Result<Value, String> {
-    let volume_filter = params.get("volume").and_then(|v| v.as_str()).map(|s| s.to_uppercase());
-    let snapshot_a_input = params.get("snapshot_a").and_then(|s| s.as_str()).ok_or("Missing snapshot_a parameter")?;
-    let snapshot_b_input = params.get("snapshot_b").and_then(|s| s.as_str()).ok_or("Missing snapshot_b parameter")?;
-    let path_filter = params.get("path_filter").and_then(|p| p.as_str()).map(|s| s.replace('\\', "/"));
+    let volume_filter = params
+        .get("volume")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_uppercase());
+    let snapshot_a_input = params
+        .get("snapshot_a")
+        .and_then(|s| s.as_str())
+        .ok_or("Missing snapshot_a parameter")?;
+    let snapshot_b_input = params
+        .get("snapshot_b")
+        .and_then(|s| s.as_str())
+        .ok_or("Missing snapshot_b parameter")?;
+    let path_filter = params
+        .get("path_filter")
+        .and_then(|p| p.as_str())
+        .map(|s| s.replace('\\', "/"));
 
     let conn = get_db_connection().map_err(|e| e.to_string())?;
 
     let parent_a = get_parent_snapshot_by_label_or_id(snapshot_a_input)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("E_NOT_FOUND: Couldn't find snapshot \"{}\". Check the path/ID and try again.", snapshot_a_input))?;
+        .ok_or_else(|| {
+            format!(
+                "E_NOT_FOUND: Couldn't find snapshot \"{}\". Check the path/ID and try again.",
+                snapshot_a_input
+            )
+        })?;
 
     let parent_b = get_parent_snapshot_by_label_or_id(snapshot_b_input)
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("E_NOT_FOUND: Couldn't find snapshot \"{}\". Check the path/ID and try again.", snapshot_b_input))?;
+        .ok_or_else(|| {
+            format!(
+                "E_NOT_FOUND: Couldn't find snapshot \"{}\". Check the path/ID and try again.",
+                snapshot_b_input
+            )
+        })?;
 
     let mut volume_pairs = Vec::new();
 
@@ -356,7 +387,10 @@ pub fn handle_snapshot_diff(params: Value) -> Result<Value, String> {
         if let (Some(ca), Some(cb)) = (child_a, child_b) {
             volume_pairs.push((vol, ca.sequence_number, cb.sequence_number));
         } else {
-            return Err(format!("E_NOT_FOUND: Target volume {} is not present in both snapshots.", vol));
+            return Err(format!(
+                "E_NOT_FOUND: Target volume {} is not present in both snapshots.",
+                vol
+            ));
         }
     } else {
         // Find common volumes
@@ -397,11 +431,13 @@ pub fn calculate_diff(
     path_filter: Option<String>,
 ) -> Result<Vec<DiffFile>, String> {
     // Check if start snapshot sequence is older than the oldest mutation log entry
-    let min_seq: i64 = conn.query_row(
-        "SELECT COALESCE(MIN(sequence), 0) FROM mutation_log WHERE volume = ?1",
-        rusqlite::params![volume],
-        |row| row.get(0)
-    ).unwrap_or(0);
+    let min_seq: i64 = conn
+        .query_row(
+            "SELECT COALESCE(MIN(sequence), 0) FROM mutation_log WHERE volume = ?1",
+            rusqlite::params![volume],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
 
     if start_seq < min_seq && min_seq > 1 {
         let config = config_mgr::load_config();
@@ -412,18 +448,18 @@ pub fn calculate_diff(
     }
 
     // Query all mutations between the two sequence bookmarks
-    let mut stmt = conn.prepare(
-        "SELECT sequence, file_id, parent_file_id, name, kind, is_directory, size_delta
+    let mut stmt = conn
+        .prepare(
+            "SELECT sequence, file_id, parent_file_id, name, kind, is_directory, size_delta
          FROM mutation_log
          WHERE volume = ?1 AND sequence > ?2 AND sequence <= ?3
-         ORDER BY sequence ASC"
-    ).map_err(|e| e.to_string())?;
+         ORDER BY sequence ASC",
+        )
+        .map_err(|e| e.to_string())?;
 
-    let mut rows = stmt.query(rusqlite::params![
-        volume,
-        start_seq,
-        end_seq
-    ]).map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query(rusqlite::params![volume, start_seq, end_seq])
+        .map_err(|e| e.to_string())?;
 
     // In-memory reduction map
     let mut diff_map: HashMap<u64, DiffFile> = HashMap::new();
@@ -452,34 +488,40 @@ pub fn calculate_diff(
                         entry.size_delta += size_delta;
                     }
                 } else {
-                    diff_map.insert(file_id, DiffFile {
+                    diff_map.insert(
                         file_id,
-                        parent_file_id,
-                        name,
-                        is_directory: is_dir,
-                        size_delta,
-                        kind: "Created".to_string(),
-                        old_name: None,
-                        old_parent_file_id: None,
-                        path: String::new(),
-                    });
+                        DiffFile {
+                            file_id,
+                            parent_file_id,
+                            name,
+                            is_directory: is_dir,
+                            size_delta,
+                            kind: "Created".to_string(),
+                            old_name: None,
+                            old_parent_file_id: None,
+                            path: String::new(),
+                        },
+                    );
                 }
             }
             "Modified" => {
                 if let Some(entry) = diff_map.get_mut(&file_id) {
                     entry.size_delta += size_delta;
                 } else {
-                    diff_map.insert(file_id, DiffFile {
+                    diff_map.insert(
                         file_id,
-                        parent_file_id,
-                        name,
-                        is_directory: is_dir,
-                        size_delta,
-                        kind: "Modified".to_string(),
-                        old_name: None,
-                        old_parent_file_id: None,
-                        path: String::new(),
-                    });
+                        DiffFile {
+                            file_id,
+                            parent_file_id,
+                            name,
+                            is_directory: is_dir,
+                            size_delta,
+                            kind: "Modified".to_string(),
+                            old_name: None,
+                            old_parent_file_id: None,
+                            path: String::new(),
+                        },
+                    );
                 }
             }
             "Renamed" => {
@@ -493,9 +535,10 @@ pub fn calculate_diff(
                              WHERE volume = ?1 AND file_id = ?2 AND sequence < ?3
                              ORDER BY sequence DESC LIMIT 1",
                             rusqlite::params![volume, file_id, seq],
-                            |row| Ok((row.get(0)?, row.get(1)?))
+                            |row| Ok((row.get(0)?, row.get(1)?)),
                         );
-                        let (o_name, o_parent) = old_info.unwrap_or_else(|_| (entry.name.clone(), entry.parent_file_id));
+                        let (o_name, o_parent) =
+                            old_info.unwrap_or_else(|_| (entry.name.clone(), entry.parent_file_id));
                         entry.kind = "Renamed".to_string();
                         entry.old_name = Some(o_name);
                         entry.old_parent_file_id = Some(o_parent);
@@ -506,20 +549,24 @@ pub fn calculate_diff(
                          WHERE volume = ?1 AND file_id = ?2 AND sequence < ?3
                          ORDER BY sequence DESC LIMIT 1",
                         rusqlite::params![volume, file_id, seq],
-                        |row| Ok((row.get(0)?, row.get(1)?))
+                        |row| Ok((row.get(0)?, row.get(1)?)),
                     );
-                    let (o_name, o_parent) = old_info.unwrap_or_else(|_| (name.clone(), parent_file_id));
-                    diff_map.insert(file_id, DiffFile {
+                    let (o_name, o_parent) =
+                        old_info.unwrap_or_else(|_| (name.clone(), parent_file_id));
+                    diff_map.insert(
                         file_id,
-                        parent_file_id,
-                        name,
-                        is_directory: is_dir,
-                        size_delta,
-                        kind: "Renamed".to_string(),
-                        old_name: Some(o_name),
-                        old_parent_file_id: Some(o_parent),
-                        path: String::new(),
-                    });
+                        DiffFile {
+                            file_id,
+                            parent_file_id,
+                            name,
+                            is_directory: is_dir,
+                            size_delta,
+                            kind: "Renamed".to_string(),
+                            old_name: Some(o_name),
+                            old_parent_file_id: Some(o_parent),
+                            path: String::new(),
+                        },
+                    );
                 }
             }
             "Deleted" => {
@@ -532,17 +579,20 @@ pub fn calculate_diff(
                         entry.size_delta += size_delta;
                     }
                 } else {
-                    diff_map.insert(file_id, DiffFile {
+                    diff_map.insert(
                         file_id,
-                        parent_file_id,
-                        name,
-                        is_directory: is_dir,
-                        size_delta,
-                        kind: "Deleted".to_string(),
-                        old_name: None,
-                        old_parent_file_id: None,
-                        path: String::new(),
-                    });
+                        DiffFile {
+                            file_id,
+                            parent_file_id,
+                            name,
+                            is_directory: is_dir,
+                            size_delta,
+                            kind: "Deleted".to_string(),
+                            old_name: None,
+                            old_parent_file_id: None,
+                            path: String::new(),
+                        },
+                    );
                 }
             }
             _ => {}
@@ -552,13 +602,8 @@ pub fn calculate_diff(
     // Resolve paths & filter by prefix
     let mut results = Vec::new();
     for (_, mut file) in diff_map {
-        let full_path = resolve_diff_file_path(
-            &conn,
-            volume,
-            file.file_id,
-            &file.name,
-            file.parent_file_id,
-        );
+        let full_path =
+            resolve_diff_file_path(&conn, volume, file.file_id, &file.name, file.parent_file_id);
 
         // Path filter check (case-insensitive)
         if let Some(ref filter) = path_filter {
@@ -600,7 +645,8 @@ mod tests {
                 source TEXT NOT NULL
             )",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn
     }
 

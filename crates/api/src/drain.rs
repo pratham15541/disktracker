@@ -170,13 +170,11 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
             "UPDATE facts SET name = ?3, parent_file_id = ?4 WHERE volume = ?1 AND file_id = ?2",
         )?;
 
-        let mut get_previous_size_stmt = tx.prepare_cached(
-            "SELECT size FROM facts WHERE volume = ?1 AND file_id = ?2"
-        )?;
+        let mut get_previous_size_stmt =
+            tx.prepare_cached("SELECT size FROM facts WHERE volume = ?1 AND file_id = ?2")?;
 
-        let mut update_size_delta_stmt = tx.prepare_cached(
-            "UPDATE mutation_log SET size_delta = ?1 WHERE sequence = ?2"
-        )?;
+        let mut update_size_delta_stmt =
+            tx.prepare_cached("UPDATE mutation_log SET size_delta = ?1 WHERE sequence = ?2")?;
 
         for m in &mutations {
             match m.kind.as_str() {
@@ -211,7 +209,8 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
                         size as i64 - previous_size as i64
                     };
 
-                    let _ = update_size_delta_stmt.execute(rusqlite::params![computed_delta, m.sequence]);
+                    let _ = update_size_delta_stmt
+                        .execute(rusqlite::params![computed_delta, m.sequence]);
 
                     if let Err(e) = insert_fact_stmt.execute(rusqlite::params![
                         volume,
@@ -240,7 +239,8 @@ fn drain_batch(conn: &mut Connection, volume: &str) -> Result<usize, rusqlite::E
                     };
 
                     let computed_delta = -(previous_size as i64);
-                    let _ = update_size_delta_stmt.execute(rusqlite::params![computed_delta, m.sequence]);
+                    let _ = update_size_delta_stmt
+                        .execute(rusqlite::params![computed_delta, m.sequence]);
 
                     if let Err(e) = delete_fact_stmt.execute(rusqlite::params![volume, m.file_id]) {
                         eprintln!(

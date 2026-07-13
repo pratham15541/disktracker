@@ -331,14 +331,14 @@ pub fn list_parent_snapshots_db(
     let conn = get_db_connection()?;
     let mut query = String::from(
         "SELECT id, label, created_at, daemon_version, schema_version, retention_setting
-         FROM parent_snapshots"
+         FROM parent_snapshots",
     );
     let mut params = Vec::new();
     if let Some(vol) = volume_filter {
         params.push(vol.to_string());
         query.push_str(" WHERE id IN (SELECT parent_id FROM volume_snapshots WHERE volume = ?1)");
     }
-    
+
     query.push_str(" ORDER BY created_at DESC LIMIT ");
     query.push_str(&limit.to_string());
 

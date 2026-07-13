@@ -788,7 +788,7 @@ async fn handle_request(
                         }
                     }
 
-                    for doc in docs {
+                    for (doc, doc_score) in docs {
                         let doc_name = doc
                             .get_first(si.name)
                             .and_then(|v| v.as_str())
@@ -839,6 +839,7 @@ async fn handle_request(
                             "is_directory": doc_is_dir,
                             "file_id": doc_file_id,
                             "attributes": doc_attrs,
+                            "score": doc_score,
                         }));
                     }
 
@@ -892,22 +893,24 @@ async fn handle_request(
                 }
             }
 
-            if !delete_snapshot {
-                match storage::get_db_connection() {
-                    Ok(conn) => {
-                        let _ = conn.execute("DELETE FROM facts", []);
-                        let _ = conn.execute("DELETE FROM mutation_log", []);
-                        let _ = conn.execute("DELETE FROM drain_state", []);
-                        let _ = conn.execute("DELETE FROM pruning_log", []);
-                        let _ = conn.execute("VACUUM", []);
+            match storage::get_db_connection() {
+                Ok(conn) => {
+                    let _ = conn.execute("DELETE FROM facts", []);
+                    let _ = conn.execute("DELETE FROM mutation_log", []);
+                    let _ = conn.execute("DELETE FROM drain_state", []);
+                    let _ = conn.execute("DELETE FROM pruning_log", []);
+                    if delete_snapshot {
+                        let _ = conn.execute("DELETE FROM volume_snapshots", []);
+                        let _ = conn.execute("DELETE FROM parent_snapshots", []);
                     }
-                    Err(e) => {
-                        return JsonRpcResponse::error(
-                            req.id,
-                            -32603,
-                            format!("Failed to connect to database for cleanup: {}", e),
-                        );
-                    }
+                    let _ = conn.execute("VACUUM", []);
+                }
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32603,
+                        format!("Failed to connect to database for cleanup: {}", e),
+                    );
                 }
             }
 

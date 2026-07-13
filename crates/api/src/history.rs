@@ -43,7 +43,9 @@ fn parse_path(path: &str) -> Result<(String, String), String> {
             } else {
                 format!("{}:", drive_letter.to_uppercase())
             };
-            let remaining = without_prefix[slash_idx..].trim_start_matches('/').to_string();
+            let remaining = without_prefix[slash_idx..]
+                .trim_start_matches('/')
+                .to_string();
             return Ok((drive, remaining));
         } else {
             let drive_letter = without_prefix;
@@ -77,7 +79,12 @@ fn get_root_file_id(conn: &Connection, volume: &str) -> Result<u64, String> {
     }
 }
 
-fn verify_parent_chain(conn: &Connection, volume: &str, start_parent_id: u64, expected_parents: &[&str]) -> bool {
+fn verify_parent_chain(
+    conn: &Connection,
+    volume: &str,
+    start_parent_id: u64,
+    expected_parents: &[&str],
+) -> bool {
     if expected_parents.is_empty() {
         if let Ok(root_id) = get_root_file_id(conn, volume) {
             return start_parent_id == root_id;
@@ -128,7 +135,7 @@ pub fn resolve_path_to_id(conn: &Connection, path: &str) -> Result<(String, u64)
     }
 
     let parts: Vec<&str> = remaining.split('/').filter(|s| !s.is_empty()).collect();
-    
+
     // First, try resolving via current facts table (live files/folders)
     let mut current_id = get_root_file_id(conn, &volume)?;
     let mut facts_resolved = true;
@@ -158,14 +165,16 @@ pub fn resolve_path_to_id(conn: &Connection, path: &str) -> Result<(String, u64)
     let mut stmt = conn.prepare(
         "SELECT DISTINCT file_id, parent_file_id FROM mutation_log WHERE volume = ?1 AND name = ?2 COLLATE NOCASE"
     ).map_err(|e| e.to_string())?;
-    
-    let candidates = stmt.query_map(rusqlite::params![&volume, last_part], |row| {
-        Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
-    }).map_err(|e| e.to_string())?;
+
+    let candidates = stmt
+        .query_map(rusqlite::params![&volume, last_part], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
+        })
+        .map_err(|e| e.to_string())?;
 
     for candidate in candidates {
         if let Ok((fid, parent_id)) = candidate {
-            if verify_parent_chain(conn, &volume, parent_id, &parts[0..parts.len()-1]) {
+            if verify_parent_chain(conn, &volume, parent_id, &parts[0..parts.len() - 1]) {
                 return Ok((volume, fid));
             }
         }
@@ -186,11 +195,13 @@ pub fn get_history(
 ) -> Result<HistoryResponse, String> {
     let (volume, file_id) = resolve_path_to_id(conn, path)?;
 
-    let is_dir: bool = conn.query_row(
-        "SELECT is_directory FROM facts WHERE volume = ?1 AND file_id = ?2",
-        rusqlite::params![&volume, file_id],
-        |row| row.get(0),
-    ).unwrap_or(false);
+    let is_dir: bool = conn
+        .query_row(
+            "SELECT is_directory FROM facts WHERE volume = ?1 AND file_id = ?2",
+            rusqlite::params![&volume, file_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
 
     let is_dir = if is_dir {
         true
@@ -199,7 +210,8 @@ pub fn get_history(
             "SELECT is_directory FROM mutation_log WHERE volume = ?1 AND file_id = ?2 LIMIT 1",
             rusqlite::params![&volume, file_id],
             |row| Ok(row.get::<_, i32>(0)? != 0),
-        ).unwrap_or(false)
+        )
+        .unwrap_or(false)
     };
 
     // 1. Check truncation based on retention config
@@ -316,20 +328,22 @@ pub fn get_history(
     query.push_str(&format!(" LIMIT ?{}", params.len()));
 
     let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(params), |row| {
-        Ok(HistoryEntry {
-            sequence: row.get(0)?,
-            volume: row.get(1)?,
-            file_id: row.get(2)?,
-            parent_file_id: row.get(3)?,
-            name: row.get(4)?,
-            kind: row.get(5)?,
-            is_directory: row.get::<_, i32>(6)? != 0,
-            size_delta: row.get(7)?,
-            at: row.get(8)?,
-            source: row.get(9)?,
+    let rows = stmt
+        .query_map(rusqlite::params_from_iter(params), |row| {
+            Ok(HistoryEntry {
+                sequence: row.get(0)?,
+                volume: row.get(1)?,
+                file_id: row.get(2)?,
+                parent_file_id: row.get(3)?,
+                name: row.get(4)?,
+                kind: row.get(5)?,
+                is_directory: row.get::<_, i32>(6)? != 0,
+                size_delta: row.get(7)?,
+                at: row.get(8)?,
+                source: row.get(9)?,
+            })
         })
-    }).map_err(|e| e.to_string())?;
+        .map_err(|e| e.to_string())?;
 
     let mut db_entries: Vec<HistoryEntry> = rows.flatten().collect();
     let has_more = db_entries.len() > fetch_limit;
@@ -394,17 +408,23 @@ pub fn get_history(
         }
     }
 
-    let total_mutations: i64 = conn.query_row("SELECT COUNT(*) FROM mutation_log", [], |row| row.get(0)).unwrap_or(0);
-    let matched_mutations: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM mutation_log WHERE volume = ?1 AND file_id = ?2",
-        rusqlite::params![&volume, file_id],
-        |row| row.get(0)
-    ).unwrap_or(0);
-    let parent_matched: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM mutation_log WHERE volume = ?1 AND parent_file_id = ?2",
-        rusqlite::params![&volume, file_id],
-        |row| row.get(0)
-    ).unwrap_or(0);
+    let total_mutations: i64 = conn
+        .query_row("SELECT COUNT(*) FROM mutation_log", [], |row| row.get(0))
+        .unwrap_or(0);
+    let matched_mutations: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM mutation_log WHERE volume = ?1 AND file_id = ?2",
+            rusqlite::params![&volume, file_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let parent_matched: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM mutation_log WHERE volume = ?1 AND parent_file_id = ?2",
+            rusqlite::params![&volume, file_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
     let debug_info = format!(
         "Path: '{}', Resolved: ({}, file_id: {}), is_dir: {}, Total mutations in DB: {}, Matches for file_id: {}, Matches for parent_file_id: {}",
         path, volume, file_id, is_dir, total_mutations, matched_mutations, parent_matched

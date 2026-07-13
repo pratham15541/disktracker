@@ -542,9 +542,9 @@ pub fn commit_search_index() -> Result<(), String> {
 }
 
 pub fn reconcile_search_results(
-    docs: Vec<TantivyDocument>,
+    docs: Vec<(TantivyDocument, f32)>,
     conn: &Connection,
-) -> Vec<TantivyDocument> {
+) -> Vec<(TantivyDocument, f32)> {
     let si = match init_search_index() {
         Ok(s) => s,
         Err(_) => return docs,
@@ -555,7 +555,7 @@ pub fn reconcile_search_results(
     }
 
     let mut doc_keys = Vec::with_capacity(docs.len());
-    for doc in &docs {
+    for (doc, _) in &docs {
         let doc_volume = doc
             .get_first(si.volume)
             .and_then(|v| v.as_str())
@@ -600,24 +600,24 @@ pub fn reconcile_search_results(
     let mut alive = Vec::with_capacity(docs.len());
     let mut stale_uids: Vec<(String, u64)> = Vec::new();
 
-    for doc in docs {
+    for (doc, score) in docs {
         let doc_volume = match doc.get_first(si.volume).and_then(|v| v.as_str()) {
             Some(v) => v.to_string(),
             None => {
-                alive.push(doc);
+                alive.push((doc, score));
                 continue;
             }
         };
         let doc_file_id = match doc.get_first(si.file_id).and_then(|v| v.as_u64()) {
             Some(id) => id,
             None => {
-                alive.push(doc);
+                alive.push((doc, score));
                 continue;
             }
         };
 
         if existing_keys.contains(&(doc_volume.clone(), doc_file_id)) {
-            alive.push(doc);
+            alive.push((doc, score));
         } else {
             stale_uids.push((doc_volume, doc_file_id));
         }
@@ -649,7 +649,7 @@ pub fn execute_search(
     hidden_filter: Option<bool>,
     system_filter: Option<bool>,
     limit: usize,
-) -> Result<Vec<TantivyDocument>, String> {
+) -> Result<Vec<(TantivyDocument, f32)>, String> {
     let si = init_search_index()?;
     let searcher = si.reader.searcher();
 
@@ -924,9 +924,9 @@ pub fn execute_search(
         .map_err(|e| e.to_string())?;
 
     let mut docs = Vec::new();
-    for (_score, doc_address) in top_docs {
+    for (score, doc_address) in top_docs {
         if let Ok(doc) = searcher.doc(doc_address) {
-            docs.push(doc);
+            docs.push((doc, score));
         }
     }
     Ok(docs)

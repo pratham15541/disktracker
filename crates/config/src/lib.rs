@@ -12,7 +12,10 @@ pub struct AppConfig {
     pub fuzzy: bool,
     #[serde(default = "default_auto_snapshot", alias = "auto-snapshot")]
     pub auto_snapshot: bool,
-    #[serde(default = "default_auto_snapshot_interval", alias = "auto-snapshot-interval")]
+    #[serde(
+        default = "default_auto_snapshot_interval",
+        alias = "auto-snapshot-interval"
+    )]
     pub auto_snapshot_interval: String,
 }
 

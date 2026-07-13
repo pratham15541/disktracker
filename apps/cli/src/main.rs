@@ -826,6 +826,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     size_str: String,
                                     modified_str: String,
                                     is_match: bool,
+                                    score: f64,
                                     children: std::collections::BTreeMap<String, TreeNode>,
                                 }
 
@@ -838,6 +839,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             size_str: String::new(),
                                             modified_str: String::new(),
                                             is_match: false,
+                                            score: 0.0,
                                             children: std::collections::BTreeMap::new(),
                                         }
                                     }
@@ -882,9 +884,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         width_mod = max_mod
                                     );
 
-                                    let child_count = node.children.len();
+                                    let mut sorted_children: Vec<&TreeNode> = node.children.values().collect();
+                                    sorted_children.sort_by(|a, b| {
+                                        b.score.partial_cmp(&a.score)
+                                            .unwrap_or(std::cmp::Ordering::Equal)
+                                            .then_with(|| a.name.cmp(&b.name))
+                                    });
+
+                                    let child_count = sorted_children.len();
                                     let mut i = 0;
-                                    for (_, child) in &node.children {
+                                    for child in sorted_children {
                                         i += 1;
                                         let is_last_child = i == child_count;
                                         let new_prefix = if is_root {
@@ -1007,6 +1016,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     leaf.attributes = attr_flags;
                                     leaf.size_str = size_str;
                                     leaf.modified_str = dt;
+                                    leaf.score = item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                 }
 
                                 println!(
@@ -1026,7 +1036,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     width_mod = max_mod
                                 );
 
-                                for (_, root_node) in &roots {
+                                fn compute_node_scores(node: &mut TreeNode) -> f64 {
+                                    let mut max_score = if node.is_match { node.score } else { 0.0 };
+                                    for child in node.children.values_mut() {
+                                        let child_score = compute_node_scores(child);
+                                        if child_score > max_score {
+                                            max_score = child_score;
+                                        }
+                                    }
+                                    node.score = max_score;
+                                    max_score
+                                }
+
+                                for root_node in roots.values_mut() {
+                                    compute_node_scores(root_node);
+                                }
+
+                                let mut sorted_roots: Vec<&TreeNode> = roots.values().collect();
+                                sorted_roots.sort_by(|a, b| {
+                                    b.score.partial_cmp(&a.score)
+                                        .unwrap_or(std::cmp::Ordering::Equal)
+                                        .then_with(|| a.name.cmp(&b.name))
+                                });
+
+                                for root_node in sorted_roots {
                                     print_tree_node(
                                         root_node, "", false, true, max_vol, max_attrs, max_size,
                                         max_mod,
@@ -2006,75 +2039,72 @@ async fn run_uninstall(delete_snapshot: bool, yes: bool) -> Result<(), Box<dyn s
         }
         Err(_) => {
             println!("  [INFO] Daemon is not running.");
-            if !delete_snapshot {
-                // If daemon is not running and we want to preserve snapshots but clear tables,
-                // we temporarily spawn the daemon in the background to handle the cleanup RPC,
-                // and then terminate it.
-                println!("[Cli] Starting daemon temporarily to perform database cleanup...");
-                let current_exe = std::env::current_exe()?;
-                let mut cmd = std::process::Command::new(current_exe);
-                cmd.arg("daemon");
-                cmd.stdin(std::process::Stdio::null());
-                cmd.stdout(std::process::Stdio::null());
-                cmd.stderr(std::process::Stdio::null());
+            // If daemon is not running, we temporarily spawn the daemon in the background to handle the cleanup RPC,
+            // and then terminate it.
+            println!("[Cli] Starting daemon temporarily to perform database cleanup...");
+            let current_exe = std::env::current_exe()?;
+            let mut cmd = std::process::Command::new(current_exe);
+            cmd.arg("daemon");
+            cmd.stdin(std::process::Stdio::null());
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
 
-                #[cfg(windows)]
-                {
-                    use std::os::windows::process::CommandExt;
-                    const DETACHED_PROCESS: u32 = 0x00000008;
-                    cmd.creation_flags(DETACHED_PROCESS);
-                }
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const DETACHED_PROCESS: u32 = 0x00000008;
+                cmd.creation_flags(DETACHED_PROCESS);
+            }
 
-                #[cfg(unix)]
-                {
-                    use std::os::unix::process::CommandExt;
-                    cmd.process_group(0);
-                }
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                cmd.process_group(0);
+            }
 
-                if let Ok(mut child) = cmd.spawn() {
-                    // Poll IPC until reachable (timeout after 5 seconds)
-                    let start_wait = std::time::Instant::now();
-                    let mut connected = false;
-                    let mut daemon_pid = child.id();
-                    while start_wait.elapsed().as_secs() < 5 {
-                        if let Ok(resp) = query_status().await {
-                            if let Some(res) = resp.result {
-                                if let Ok(snap) = serde_json::from_value::<ProgressSnapshot>(res) {
-                                    daemon_pid = snap.daemon_pid;
-                                    connected = true;
-                                    break;
-                                }
+            if let Ok(mut child) = cmd.spawn() {
+                // Poll IPC until reachable (timeout after 5 seconds)
+                let start_wait = std::time::Instant::now();
+                let mut connected = false;
+                let mut daemon_pid = child.id();
+                while start_wait.elapsed().as_secs() < 5 {
+                    if let Ok(resp) = query_status().await {
+                        if let Some(res) = resp.result {
+                            if let Ok(snap) = serde_json::from_value::<ProgressSnapshot>(res) {
+                                daemon_pid = snap.daemon_pid;
+                                connected = true;
+                                break;
                             }
                         }
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                     }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
 
-                    if connected {
-                        let params = serde_json::json!({ "delete_snapshot": delete_snapshot });
-                        if let Err(e) = query_rpc("uninstall_cleanup", params).await {
-                            eprintln!("  [WARNING] Daemon uninstall cleanup RPC failed: {:?}", e);
-                        } else {
-                            println!("  [OK] Daemon performed uninstall cleanup.");
-                        }
-                        println!("[Cli] Stopping temporary daemon...");
-                        let _ = platform_windows::kill_process_by_pid(daemon_pid);
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                if connected {
+                    let params = serde_json::json!({ "delete_snapshot": delete_snapshot });
+                    if let Err(e) = query_rpc("uninstall_cleanup", params).await {
+                        eprintln!("  [WARNING] Daemon uninstall cleanup RPC failed: {:?}", e);
                     } else {
-                        eprintln!("  [WARNING] Failed to connect to temporary daemon. Cleaning config file only.");
-                        let mut config_path = db_dir.clone();
-                        config_path.push("config.toml");
-                        if config_path.exists() {
-                            let _ = std::fs::remove_file(&config_path);
-                        }
-                        let _ = child.kill();
+                        println!("  [OK] Daemon performed uninstall cleanup.");
                     }
+                    println!("[Cli] Stopping temporary daemon...");
+                    let _ = platform_windows::kill_process_by_pid(daemon_pid);
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 } else {
-                    eprintln!("  [WARNING] Failed to spawn temporary daemon. Cleaning config file only.");
+                    eprintln!("  [WARNING] Failed to connect to temporary daemon. Cleaning config file only.");
                     let mut config_path = db_dir.clone();
                     config_path.push("config.toml");
                     if config_path.exists() {
                         let _ = std::fs::remove_file(&config_path);
                     }
+                    let _ = child.kill();
+                }
+            } else {
+                eprintln!("  [WARNING] Failed to spawn temporary daemon. Cleaning config file only.");
+                let mut config_path = db_dir.clone();
+                config_path.push("config.toml");
+                if config_path.exists() {
+                    let _ = std::fs::remove_file(&config_path);
                 }
             }
         }
@@ -2108,6 +2138,7 @@ async fn run_uninstall(delete_snapshot: bool, yes: bool) -> Result<(), Box<dyn s
                 match std::fs::remove_dir_all(&db_dir) {
                     Ok(_) => {
                         println!("  [OK] Database files and directory deleted.");
+                        println!("  [OK] Snapshots deleted during uninstallation.");
                         break;
                     }
                     Err(e) => {
