@@ -881,6 +881,38 @@ async fn handle_request(
                 }),
             )
         }
+        "uninstall_cleanup" => {
+            let delete_snapshot = req.params.get("delete_snapshot").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            if let Ok(db_dir) = storage::get_db_dir() {
+                let mut config_path = db_dir.clone();
+                config_path.push("config.toml");
+                if config_path.exists() {
+                    let _ = std::fs::remove_file(&config_path);
+                }
+            }
+
+            if !delete_snapshot {
+                match storage::get_db_connection() {
+                    Ok(conn) => {
+                        let _ = conn.execute("DELETE FROM facts", []);
+                        let _ = conn.execute("DELETE FROM mutation_log", []);
+                        let _ = conn.execute("DELETE FROM drain_state", []);
+                        let _ = conn.execute("DELETE FROM pruning_log", []);
+                        let _ = conn.execute("VACUUM", []);
+                    }
+                    Err(e) => {
+                        return JsonRpcResponse::error(
+                            req.id,
+                            -32603,
+                            format!("Failed to connect to database for cleanup: {}", e),
+                        );
+                    }
+                }
+            }
+
+            JsonRpcResponse::success(req.id, serde_json::json!({ "status": "ok" }))
+        }
         _ => JsonRpcResponse::error(req.id, -32601, format!("Method not found: {}", req.method)),
     }
 }

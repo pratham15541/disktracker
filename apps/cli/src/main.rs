@@ -1972,12 +1972,24 @@ async fn run_uninstall(delete_snapshot: bool, yes: bool) -> Result<(), Box<dyn s
 
     println!("[Cli] Starting uninstallation...");
 
-    // 1. Check if daemon is running and stop it
+    let db_dir = storage::get_db_dir()?;
+
+    // 1. Check if daemon is running.
     let status_res = query_status().await;
     match status_res {
         Ok(resp) => {
             if let Some(result) = resp.result {
                 if let Ok(snap) = serde_json::from_value::<ProgressSnapshot>(result) {
+                    println!("[Cli] Daemon is running. Sending cleanup command to daemon...");
+                    
+                    // Call the uninstall_cleanup JSON-RPC method.
+                    let params = serde_json::json!({ "delete_snapshot": delete_snapshot });
+                    if let Err(e) = query_rpc("uninstall_cleanup", params).await {
+                        eprintln!("  [WARNING] Daemon uninstall cleanup RPC failed: {:?}", e);
+                    } else {
+                        println!("  [OK] Daemon performed uninstall cleanup.");
+                    }
+
                     println!("[Cli] Stopping running daemon (PID {})...", snap.daemon_pid);
                     match platform_windows::kill_process_by_pid(snap.daemon_pid) {
                         Ok(_) => {
@@ -1993,7 +2005,78 @@ async fn run_uninstall(delete_snapshot: bool, yes: bool) -> Result<(), Box<dyn s
             }
         }
         Err(_) => {
-            println!("  [OK] Daemon is not running.");
+            println!("  [INFO] Daemon is not running.");
+            if !delete_snapshot {
+                // If daemon is not running and we want to preserve snapshots but clear tables,
+                // we temporarily spawn the daemon in the background to handle the cleanup RPC,
+                // and then terminate it.
+                println!("[Cli] Starting daemon temporarily to perform database cleanup...");
+                let current_exe = std::env::current_exe()?;
+                let mut cmd = std::process::Command::new(current_exe);
+                cmd.arg("daemon");
+                cmd.stdin(std::process::Stdio::null());
+                cmd.stdout(std::process::Stdio::null());
+                cmd.stderr(std::process::Stdio::null());
+
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    const DETACHED_PROCESS: u32 = 0x00000008;
+                    cmd.creation_flags(DETACHED_PROCESS);
+                }
+
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::CommandExt;
+                    cmd.process_group(0);
+                }
+
+                if let Ok(mut child) = cmd.spawn() {
+                    // Poll IPC until reachable (timeout after 5 seconds)
+                    let start_wait = std::time::Instant::now();
+                    let mut connected = false;
+                    let mut daemon_pid = child.id();
+                    while start_wait.elapsed().as_secs() < 5 {
+                        if let Ok(resp) = query_status().await {
+                            if let Some(res) = resp.result {
+                                if let Ok(snap) = serde_json::from_value::<ProgressSnapshot>(res) {
+                                    daemon_pid = snap.daemon_pid;
+                                    connected = true;
+                                    break;
+                                }
+                            }
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+
+                    if connected {
+                        let params = serde_json::json!({ "delete_snapshot": delete_snapshot });
+                        if let Err(e) = query_rpc("uninstall_cleanup", params).await {
+                            eprintln!("  [WARNING] Daemon uninstall cleanup RPC failed: {:?}", e);
+                        } else {
+                            println!("  [OK] Daemon performed uninstall cleanup.");
+                        }
+                        println!("[Cli] Stopping temporary daemon...");
+                        let _ = platform_windows::kill_process_by_pid(daemon_pid);
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    } else {
+                        eprintln!("  [WARNING] Failed to connect to temporary daemon. Cleaning config file only.");
+                        let mut config_path = db_dir.clone();
+                        config_path.push("config.toml");
+                        if config_path.exists() {
+                            let _ = std::fs::remove_file(&config_path);
+                        }
+                        let _ = child.kill();
+                    }
+                } else {
+                    eprintln!("  [WARNING] Failed to spawn temporary daemon. Cleaning config file only.");
+                    let mut config_path = db_dir.clone();
+                    config_path.push("config.toml");
+                    if config_path.exists() {
+                        let _ = std::fs::remove_file(&config_path);
+                    }
+                }
+            }
         }
     }
 
@@ -2014,7 +2097,6 @@ async fn run_uninstall(delete_snapshot: bool, yes: bool) -> Result<(), Box<dyn s
     }
 
     // 3. Delete SQLite database files or clean them up, and delete AppData folder
-    let db_dir = storage::get_db_dir()?;
     if db_dir.exists() {
         if delete_snapshot {
             println!(
@@ -2038,30 +2120,6 @@ async fn run_uninstall(delete_snapshot: bool, yes: bool) -> Result<(), Box<dyn s
                         }
                     }
                 }
-            }
-        } else {
-            println!(
-                "[Cli] Keeping snapshots, but clearing facts, logs, and config in database directory at {:?}...",
-                db_dir
-            );
-            // delete config.toml
-            let mut config_path = db_dir.clone();
-            config_path.push("config.toml");
-            if config_path.exists() {
-                let _ = std::fs::remove_file(&config_path);
-                println!("  [OK] config.toml deleted.");
-            }
-            // Clear database tables
-            let mut db_path = db_dir.clone();
-            db_path.push("disktracker.db");
-            if db_path.exists() {
-                let conn = rusqlite::Connection::open(&db_path)?;
-                let _ = conn.execute("DELETE FROM facts", []);
-                let _ = conn.execute("DELETE FROM mutation_log", []);
-                let _ = conn.execute("DELETE FROM drain_state", []);
-                let _ = conn.execute("DELETE FROM pruning_log", []);
-                let _ = conn.execute("VACUUM", []);
-                println!("  [OK] Database facts, mutation logs, and operational tables cleared (snapshots preserved).");
             }
         }
     } else {

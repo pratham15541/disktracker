@@ -6,14 +6,11 @@
 
 ## Current Active Loop
 
-**Loop 7 — Mutation Log Retention, Pruning & Config** (Epoch 2, not started)
+**Loop 11 — Top** (Epoch 2, in progress)
 
 ## Next Action
 
-Implement per `AI_MASTER_PLAN_EPOCH2.md` §3/§10 Loop 7: nightly pruning job (fixed 03:00
-local trigger, configurable window length only, default 30 days), per-volume skip-and-log
-when mid-replay, and `disktracker config get/set` scoped strictly to `retention-days` (new
-dependency: `config` crate — see `EPOCH2_DETAILED_SPEC.md` §3.1).
+Implement current-size ranking (Mode A) and growth/churn ranking (Mode B/C) for the `disktracker top` command per `AI_MASTER_PLAN_2.md` §7 and `EPOCH-2.md` §7.
 
 ---
 
@@ -45,7 +42,7 @@ correlation work belongs to a later epoch and is not tracked in this table.
 | 7 — Retention, pruning & config | Completed | yes | Antigravity | 2026-07-11 |
 | 8 — Search | Completed | yes | Antigravity | 2026-07-11 |
 | 9 — History | Completed | yes | Antigravity | 2026-07-12 |
-| 10 — Snapshots (incl. `snapshot list`) | Not started | — | — | — |
+| 10 — Snapshots (incl. `snapshot list`) | Completed | yes | User | 2026-07-13 |
 | 11 — Top | Not started | — | — | — |
 | 12 — Windows Service auto-start & management | Completed | yes | Antigravity | 2026-07-11 |
 
@@ -255,3 +252,7 @@ _(one entry per session — append, don't overwrite)_
 - What was done: Added absolute path parsing to Search `--path` filter to extract volume and relative path prefix automatically.
 - What was done: Added a configurable `fuzzy` setting (default `true`) allowing users to toggle Tier 5 fuzzy term queries on or off via config.
 - What was verified on Windows: Manually verified by the user to be fully functional on Windows.
+
+### 2026-07-13 — Epoch 2 Loop 10: Snapshots — Model: User
+- What was done: Implemented async snapshot creation (`snapshot_create` with jobs), snapshot listing (`snapshot_list`), and snapshot diffing (`snapshot_diff`) based on replaying mutations between sequence numbers. Unique label checks and auto-generated label schemes were fully wired.
+- What was verified on Windows: Manually verified by the user on native Windows.
