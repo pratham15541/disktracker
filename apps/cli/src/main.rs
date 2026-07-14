@@ -125,6 +125,48 @@ enum Commands {
         #[arg(long)]
         verbose: bool,
     },
+    /// Rank files/folders by current size or growth/churn
+    Top {
+        /// Restrict to a specific folder path (e.g. C:\Windows)
+        #[arg(long)]
+        path: Option<String>,
+
+        /// Restrict to a specific volume (e.g. C:, D:)
+        #[arg(long)]
+        volume: Option<String>,
+
+        /// Folder-only rollup
+        #[arg(long, conflicts_with = "files")]
+        folders: bool,
+
+        /// File-only, no rollup
+        #[arg(long, conflicts_with = "folders")]
+        files: bool,
+
+        /// Max number of top results to return
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// Filter by relative duration (e.g. 7d, 24h) or UTC datetime (RFC3339) since mutations occurred
+        #[arg(long, conflicts_with = "between")]
+        since: Option<String>,
+
+        /// Compare mutations between two snapshots (labels or IDs)
+        #[arg(long, num_args = 2, value_names = ["SNAP_A", "SNAP_B"], conflicts_with = "since")]
+        between: Option<Vec<String>>,
+
+        /// Rank by size delta (default for interval mode)
+        #[arg(long, conflicts_with = "churn")]
+        growth: bool,
+
+        /// Rank by modification count (churn)
+        #[arg(long, conflicts_with = "growth")]
+        churn: bool,
+
+        /// Cursor for pagination
+        #[arg(long)]
+        cursor: Option<String>,
+    },
     /// Internal subcommand to start the IPC daemon server
     #[command(hide = true)]
     Daemon {
@@ -637,6 +679,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             json,
             verbose: _,
         } => {
+            check_and_print_background_work(*json, volume.as_deref().or(path.as_deref())).await;
             let mod_after_ts = if let Some(ref s) = modified_after {
                 match parse_modified_time(s) {
                     Ok(dt) => Some(dt.timestamp()),
@@ -1087,6 +1130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             json,
             verbose,
         } => {
+            check_and_print_background_work(*json, path.as_deref()).await;
             let resolved_path = match path {
                 Some(p) => {
                     let p_buf = std::path::Path::new(p);
@@ -1142,7 +1186,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "cursor": cursor,
             });
 
-            match query_rpc("get_history", params).await {
+            let show_spinner = !*json;
+            let spinner = if show_spinner {
+                Some(Spinner::start("Loading history...".to_string()))
+            } else {
+                None
+            };
+
+            let rpc_res = query_rpc("get_history", params).await;
+
+            if let Some(s) = spinner {
+                s.stop().await;
+            }
+
+            match rpc_res {
                 Ok(resp) => {
                     if let Some(err) = resp.error {
                         let code_owned = err.data.as_ref()
@@ -1342,6 +1399,425 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::Top {
+            path,
+            volume,
+            folders,
+            files,
+            limit,
+            since,
+            between,
+            growth,
+            churn,
+            cursor,
+        } => {
+            check_and_print_background_work(cli.json, volume.as_deref().or(path.as_deref())).await;
+            let resolved_path = match path {
+                Some(p) => {
+                    let p_buf = std::path::Path::new(p);
+                    if p_buf.is_absolute() {
+                        Some(p.clone())
+                    } else {
+                        match std::env::current_dir() {
+                            Ok(cwd) => Some(cwd.join(p_buf).to_string_lossy().to_string()),
+                            Err(_) => Some(p.clone()),
+                        }
+                    }
+                }
+                None => None,
+            };
+            
+            // Resolve volume from volume or path
+            let mut resolved_vol = volume.clone().map(|v| {
+                if v.len() == 1 {
+                    format!("{}:", v.to_ascii_uppercase())
+                } else {
+                    v.to_uppercase()
+                }
+            });
+
+            if let Some(ref p) = resolved_path {
+                if let Some(vol_from_path) = resolve_volume_from_path(p) {
+                    if let Some(ref r_vol) = resolved_vol {
+                        if r_vol != &vol_from_path {
+                            print_error(cli.json, "E_INVALID_PARAMS", "Path filter and volume filter do not match.", None);
+                            std::process::exit(1);
+                        }
+                    }
+                    resolved_vol = Some(vol_from_path);
+                }
+            }
+
+            let since_ts = if let Some(ref s) = since {
+                match parse_modified_time(s) {
+                    Ok(dt) => Some(dt.timestamp()),
+                    Err(e) => {
+                        let err_msg = format!("Invalid duration/date format for since: {}", e);
+                        print_error(cli.json, "E_INVALID_PARAMS", &err_msg, None);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                None
+            };
+
+            let between_a = between.as_ref().and_then(|v| v.get(0).cloned());
+            let between_b = between.as_ref().and_then(|v| v.get(1).cloned());
+
+            let params = serde_json::json!({
+                "path": resolved_path,
+                "volume": resolved_vol,
+                "folders": *folders,
+                "files": *files,
+                "limit": *limit,
+                "since": since_ts,
+                "between_a": between_a,
+                "between_b": between_b,
+                "growth": *growth,
+                "churn": *churn,
+                "cursor": cursor.clone(),
+            });
+
+            let show_spinner = !cli.json;
+            let spinner = if show_spinner {
+                Some(Spinner::start("Calculating and loading top items...".to_string()))
+            } else {
+                None
+            };
+
+            let rpc_res = query_rpc("get_top", params).await;
+
+            if let Some(s) = spinner {
+                s.stop().await;
+            }
+
+            match rpc_res {
+                Ok(resp) => {
+                    if let Some(err) = resp.error {
+                        print_cli_rpc_error(cli.json, &err);
+                        std::process::exit(1);
+                    }
+
+                    if let Some(result) = resp.result {
+                        if cli.json {
+                            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                            std::process::exit(0);
+                        }
+
+                        let results = result
+                            .get("results")
+                            .and_then(|v| v.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        
+                        let next_cursor = result
+                            .get("next_cursor")
+                            .and_then(|v| v.as_str());
+                        
+                        let volumes_incomplete = result
+                            .get("volumes_incomplete")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                    .collect::<std::collections::HashSet<_>>()
+                            })
+                            .unwrap_or_default();
+
+                        // Warn for scanning volumes
+                        let mut shown_warnings = std::collections::HashSet::new();
+                        for item in &results {
+                            if let Some(vol) = item.get("volume").and_then(|v| v.as_str()) {
+                                if volumes_incomplete.contains(vol) && shown_warnings.insert(vol.to_string()) {
+                                    println!("⚠ Volume {} is currently scanning; results may be incomplete.", vol);
+                                }
+                            }
+                        }
+                        if let Some(ref vol) = resolved_vol {
+                            if volumes_incomplete.contains(vol) && shown_warnings.insert(vol.to_string()) {
+                                println!("⚠ Volume {} is currently scanning; results may be incomplete.", vol);
+                            }
+                        }
+
+                        if results.is_empty() {
+                            println!("No items found.");
+                            std::process::exit(0);
+                        }
+
+                        // Determine formatting widths
+                        let is_interval_mode = since.is_some() || between.is_some();
+                        let show_churn = *churn;
+
+                        let mut max_rank = 4;
+                        let mut max_name = 4;
+                        let mut max_size_or_delta = 5;
+                        let mut max_type = 4;
+                        
+                        // Verbose-only column widths
+                        let mut max_exact = 11; // "Exact Bytes" or "Exact Delta"
+                        let mut max_vol = 6;    // "Volume"
+                        let mut max_path = 9;   // "Full Path"
+                        let mut max_item_count = 10; // "Item Count"
+                        let mut max_bounds = 24; // "Window/Snapshot Bounds"
+
+                        let mut formatted_rows = Vec::new();
+
+                        for (idx, item) in results.iter().enumerate() {
+                            let rank_str = (idx + 1).to_string();
+                            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
+                            let rel_path = item.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                            let is_dir = item.get("is_directory").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let type_str = if is_dir { "Folder" } else { "File" };
+
+                            let size_or_delta_str = if !is_interval_mode {
+                                let sz = item.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+                                format_size(sz)
+                            } else if show_churn {
+                                let ch = item.get("churn").and_then(|v| v.as_u64()).unwrap_or(0);
+                                ch.to_string()
+                            } else {
+                                let sz_d = item.get("size_delta").and_then(|v| v.as_i64()).unwrap_or(0);
+                                format_size_delta(sz_d)
+                            };
+
+                            let exact_str = if !is_interval_mode {
+                                let sz = item.get("size").and_then(|v| v.as_u64()).unwrap_or(0);
+                                format!("{} B", sz)
+                            } else if show_churn {
+                                String::new()
+                            } else {
+                                let sz_d = item.get("size_delta").and_then(|v| v.as_i64()).unwrap_or(0);
+                                if sz_d > 0 {
+                                    format!("+{} B", sz_d)
+                                } else if sz_d < 0 {
+                                    format!("-{} B", -sz_d)
+                                } else {
+                                    "0 B".to_string()
+                                }
+                            };
+
+                            let full_path = if rel_path.is_empty() {
+                                vol.to_string()
+                            } else {
+                                format!("{}/{}", vol, rel_path)
+                            };
+
+                            let item_count_str = if is_dir {
+                                item.get("item_count").and_then(|v| v.as_u64()).unwrap_or(0).to_string()
+                            } else {
+                                "-".to_string()
+                            };
+
+                            let bounds_str = if is_interval_mode {
+                                let start = result.get("window_start").and_then(|v| v.as_str()).unwrap_or("");
+                                let end = result.get("window_end").and_then(|v| v.as_str()).unwrap_or("");
+                                if start.is_empty() || end.is_empty() {
+                                    "-".to_string()
+                                } else {
+                                    let start_concise = if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(start) {
+                                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                                    } else {
+                                        start.to_string()
+                                    };
+                                    let end_concise = if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(end) {
+                                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                                    } else {
+                                        end.to_string()
+                                    };
+                                    format!("[{}..{}]", start_concise, end_concise)
+                                }
+                            } else {
+                                "-".to_string()
+                            };
+
+                            max_rank = max_rank.max(rank_str.len());
+                            max_name = max_name.max(name.len());
+                            max_size_or_delta = max_size_or_delta.max(size_or_delta_str.len());
+                            max_type = max_type.max(type_str.len());
+                            max_exact = max_exact.max(exact_str.len());
+                            max_vol = max_vol.max(vol.len());
+                            max_path = max_path.max(full_path.len());
+                            max_item_count = max_item_count.max(item_count_str.len());
+                            max_bounds = max_bounds.max(bounds_str.len());
+
+                            formatted_rows.push((
+                                rank_str,
+                                name.to_string(),
+                                size_or_delta_str,
+                                exact_str,
+                                type_str.to_string(),
+                                vol.to_string(),
+                                full_path,
+                                item_count_str,
+                                bounds_str,
+                            ));
+                        }
+
+                        // Print table
+                        if !is_interval_mode {
+                            // Mode A
+                            if cli.verbose {
+                                println!(
+                                    "{:>width_rank$} | {:<width_name$} | {:>width_size$} | {:>width_exact$} | {:<width_type$} | {:<width_vol$} | {:<width_path$} | {:>width_item$}",
+                                    "Rank", "Name", "Size", "Exact Bytes", "Type", "Volume", "Full Path", "Item Count",
+                                    width_rank = max_rank,
+                                    width_name = max_name,
+                                    width_size = max_size_or_delta,
+                                    width_exact = max_exact,
+                                    width_type = max_type,
+                                    width_vol = max_vol,
+                                    width_path = max_path,
+                                    width_item = max_item_count
+                                );
+                                println!(
+                                    "{}",
+                                    "-".repeat(max_rank + max_name + max_size_or_delta + max_exact + max_type + max_vol + max_path + max_item_count + 21)
+                                );
+                                for row in formatted_rows {
+                                    println!(
+                                        "{:>width_rank$} | {:<width_name$} | {:>width_size$} | {:>width_exact$} | {:<width_type$} | {:<width_vol$} | {:<width_path$} | {:>width_item$}",
+                                        row.0, row.1, row.2, row.3, row.4, row.5, row.6, row.7,
+                                        width_rank = max_rank,
+                                        width_name = max_name,
+                                        width_size = max_size_or_delta,
+                                        width_exact = max_exact,
+                                        width_type = max_type,
+                                        width_vol = max_vol,
+                                        width_path = max_path,
+                                        width_item = max_item_count
+                                    );
+                                }
+                            } else {
+                                println!(
+                                    "{:>width_rank$} | {:<width_name$} | {:<width_path$} | {:>width_size$} | {:<width_type$}",
+                                    "Rank", "Name", "Path", "Size", "Type",
+                                    width_rank = max_rank,
+                                    width_name = max_name,
+                                    width_path = max_path,
+                                    width_size = max_size_or_delta,
+                                    width_type = max_type
+                                );
+                                println!(
+                                    "{}",
+                                    "-".repeat(max_rank + max_name + max_path + max_size_or_delta + max_type + 12)
+                                );
+                                for row in formatted_rows {
+                                    println!(
+                                        "{:>width_rank$} | {:<width_name$} | {:<width_path$} | {:>width_size$} | {:<width_type$}",
+                                        row.0, row.1, row.6, row.2, row.4,
+                                        width_rank = max_rank,
+                                        width_name = max_name,
+                                        width_path = max_path,
+                                        width_size = max_size_or_delta,
+                                        width_type = max_type
+                                    );
+                                }
+                            }
+                        } else {
+                            // Mode B/C
+                            let size_or_churn_header = if show_churn { "Churn" } else { "Size Δ" };
+                            let exact_header = "Exact Delta";
+                            if cli.verbose {
+                                if show_churn {
+                                    println!(
+                                        "{:>width_rank$} | {:<width_name$} | {:>width_size$} | {:<width_type$} | {:<width_bounds$} | {:>width_item$}",
+                                        "Rank", "Name", size_or_churn_header, "Type", "Window/Snapshot Bounds", "Item Count",
+                                        width_rank = max_rank,
+                                        width_name = max_name,
+                                        width_size = max_size_or_delta,
+                                        width_type = max_type,
+                                        width_bounds = max_bounds,
+                                        width_item = max_item_count
+                                    );
+                                    println!(
+                                        "{}",
+                                        "-".repeat(max_rank + max_name + max_size_or_delta + max_type + max_bounds + max_item_count + 15)
+                                    );
+                                    for row in formatted_rows {
+                                        println!(
+                                            "{:>width_rank$} | {:<width_name$} | {:>width_size$} | {:<width_type$} | {:<width_bounds$} | {:>width_item$}",
+                                            row.0, row.1, row.2, row.4, row.8, row.7,
+                                            width_rank = max_rank,
+                                            width_name = max_name,
+                                            width_size = max_size_or_delta,
+                                            width_type = max_type,
+                                            width_bounds = max_bounds,
+                                            width_item = max_item_count
+                                        );
+                                    }
+                                } else {
+                                    println!(
+                                        "{:>width_rank$} | {:<width_name$} | {:>width_size$} | {:>width_exact$} | {:<width_type$} | {:<width_bounds$} | {:>width_item$}",
+                                        "Rank", "Name", size_or_churn_header, exact_header, "Type", "Window/Snapshot Bounds", "Item Count",
+                                        width_rank = max_rank,
+                                        width_name = max_name,
+                                        width_size = max_size_or_delta,
+                                        width_exact = max_exact,
+                                        width_type = max_type,
+                                        width_bounds = max_bounds,
+                                        width_item = max_item_count
+                                    );
+                                    println!(
+                                        "{}",
+                                        "-".repeat(max_rank + max_name + max_size_or_delta + max_exact + max_type + max_bounds + max_item_count + 18)
+                                    );
+                                    for row in formatted_rows {
+                                        println!(
+                                            "{:>width_rank$} | {:<width_name$} | {:>width_size$} | {:>width_exact$} | {:<width_type$} | {:<width_bounds$} | {:>width_item$}",
+                                            row.0, row.1, row.2, row.3, row.4, row.8, row.7,
+                                            width_rank = max_rank,
+                                            width_name = max_name,
+                                            width_size = max_size_or_delta,
+                                            width_exact = max_exact,
+                                            width_type = max_type,
+                                            width_bounds = max_bounds,
+                                            width_item = max_item_count
+                                        );
+                                    }
+                                }
+                            } else {
+                                println!(
+                                    "{:>width_rank$} | {:<width_name$} | {:<width_path$} | {:>width_size$} | {:<width_type$}",
+                                    "Rank", "Name", "Path", size_or_churn_header, "Type",
+                                    width_rank = max_rank,
+                                    width_name = max_name,
+                                    width_path = max_path,
+                                    width_size = max_size_or_delta,
+                                    width_type = max_type
+                                );
+                                println!(
+                                    "{}",
+                                    "-".repeat(max_rank + max_name + max_path + max_size_or_delta + max_type + 12)
+                                );
+                                for row in formatted_rows {
+                                    println!(
+                                        "{:>width_rank$} | {:<width_name$} | {:<width_path$} | {:>width_size$} | {:<width_type$}",
+                                        row.0, row.1, row.6, row.2, row.4,
+                                        width_rank = max_rank,
+                                        width_name = max_name,
+                                        width_path = max_path,
+                                        width_size = max_size_or_delta,
+                                        width_type = max_type
+                                    );
+                                }
+                            }
+                        }
+
+                        if let Some(ref next_cursor_val) = next_cursor {
+                            if cli.verbose {
+                                println!("\nNext page cursor: {}", next_cursor_val);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    let err_msg = format!("Failed to query top: {}", e);
+                    print_error(cli.json, "E_INVALID_PARAMS", &err_msg, None);
+                    std::process::exit(1);
+                }
+            }
+        }
         Commands::Snapshot { subcommand } => match subcommand {
             SnapshotCommands::Create { label, path_or_volume, all } => {
                 let mut vols_to_snap = Vec::new();
@@ -1385,6 +1861,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("Creating snapshot for volumes {:?} (job: {})...", vols_to_snap, job_id);
                             }
                             
+                            let show_spinner = !cli.json;
+                            let mut spinner = if show_spinner {
+                                Some(Spinner::start("Creating snapshot...".to_string()))
+                            } else {
+                                None
+                            };
+
                             // Poll job completion
                             loop {
                                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -1392,6 +1875,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match query_rpc("job.completed", poll_params).await {
                                     Ok(poll_resp) => {
                                         if let Some(poll_err) = poll_resp.error {
+                                            if let Some(s) = spinner.take() {
+                                                s.stop().await;
+                                            }
                                             print_cli_rpc_error(cli.json, &poll_err);
                                             std::process::exit(1);
                                         }
@@ -1399,8 +1885,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let completed = job_val.get("completed").and_then(|c| c.as_bool()).unwrap_or(false);
                                             if completed {
                                                 if let Some(job_err) = job_val.get("error").and_then(|e| e.as_str()) {
+                                                    if let Some(s) = spinner.take() {
+                                                        s.stop().await;
+                                                    }
                                                     eprintln!("Error: {}", job_err);
                                                     std::process::exit(1);
+                                                }
+                                                if let Some(s) = spinner.take() {
+                                                    s.stop().await;
                                                 }
                                                 if cli.json {
                                                     println!("{}", serde_json::to_string_pretty(&job_val).unwrap());
@@ -1428,6 +1920,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                     Err(e) => {
+                                        if let Some(s) = spinner.take() {
+                                            s.stop().await;
+                                        }
                                         eprintln!("Error polling job: {}", e);
                                         std::process::exit(1);
                                     }
@@ -1537,7 +2032,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "limit": limit,
                 });
 
-                match query_rpc("snapshot_diff", params).await {
+                let show_spinner = !cli.json;
+                let spinner = if show_spinner {
+                    Some(Spinner::start("Calculating snapshot diff...".to_string()))
+                } else {
+                    None
+                };
+
+                let rpc_res = query_rpc("snapshot_diff", params).await;
+
+                if let Some(s) = spinner {
+                    s.stop().await;
+                }
+
+                match rpc_res {
                     Ok(resp) => {
                         if let Some(err) = resp.error {
                             print_cli_rpc_error(cli.json, &err);
@@ -1825,6 +2333,64 @@ async fn query_rpc(
 
 async fn query_status() -> Result<JsonRpcResponse, Box<dyn std::error::Error>> {
     query_rpc("status", serde_json::Value::Null).await
+}
+
+async fn check_and_print_background_work(json_mode: bool, filter_path_or_vol: Option<&str>) {
+    if json_mode {
+        return;
+    }
+    let filter_vol = filter_path_or_vol.and_then(|p| resolve_volume_from_path(p));
+
+    if let Ok(resp) = query_status().await {
+        if let Some(result) = resp.result {
+            if let Ok(snap) = serde_json::from_value::<ProgressSnapshot>(result) {
+                if snap.state != DaemonState::Live {
+                    let mut status_parts = Vec::new();
+                    let mut any_scanning = false;
+                    
+                    let mut vols_sorted: Vec<(&String, &VolumeProgress)> = snap.volumes.iter().collect();
+                    vols_sorted.sort_by(|a, b| a.0.cmp(b.0));
+
+                    for (vol_name, vol_progress) in vols_sorted {
+                        if let Some(ref f_vol) = filter_vol {
+                            if f_vol != vol_name {
+                                continue;
+                            }
+                        }
+                        if vol_progress.state != DaemonState::Live {
+                            any_scanning = true;
+                            let vol_phase = match vol_progress.state {
+                                DaemonState::Starting => "Starting",
+                                DaemonState::BaselineScanning => "Scanning",
+                                DaemonState::Reconciling => "Reconciling",
+                                DaemonState::Live => "Live",
+                            };
+                            status_parts.push(format!(
+                                "{}: [{}] (📁 {} dirs, 📄 {} files)",
+                                vol_name,
+                                vol_phase,
+                                vol_progress.scanner.dirs_scanned,
+                                vol_progress.scanner.files_scanned
+                            ));
+                        }
+                    }
+                    if any_scanning {
+                        let phase_str = match snap.state {
+                            DaemonState::Starting => "Starting",
+                            DaemonState::BaselineScanning => "Scanning",
+                            DaemonState::Reconciling => "Reconciling",
+                            DaemonState::Live => "Live",
+                        };
+                        println!(
+                            "⚠ Daemon is performing background work: [{}] ({})\nResults may be incomplete or outdated until the baseline scan finishes.\n",
+                            phase_str,
+                            status_parts.join(" | ")
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
 
 async fn run_doctor() {
@@ -2323,4 +2889,61 @@ fn resolve_volume_from_path_or_cwd(p: &str) -> String {
         }
     }
     "C:".to_string()
+}
+
+struct Spinner {
+    stop_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    _handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Spinner {
+    fn start(message: String) -> Self {
+        let (tx, mut rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let chars = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let mut i = 0;
+            // Print initial state immediately
+            eprint!("{} {}", chars[i], message);
+            let _ = std::io::stderr().flush();
+            i = (i + 1) % chars.len();
+
+            loop {
+                tokio::select! {
+                    _ = &mut rx => {
+                        break;
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(80)) => {
+                        eprint!("\r{} {}", chars[i], message);
+                        let _ = std::io::stderr().flush();
+                        i = (i + 1) % chars.len();
+                    }
+                }
+            }
+            // Clear the line completely from stderr using ANSI escape sequence
+            eprint!("\r\x1b[K");
+            let _ = std::io::stderr().flush();
+        });
+
+        Self {
+            stop_tx: Some(tx),
+            _handle: Some(handle),
+        }
+    }
+
+    async fn stop(mut self) {
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self._handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+impl Drop for Spinner {
+    fn drop(&mut self) {
+        if let Some(tx) = self.stop_tx.take() {
+            let _ = tx.send(());
+        }
+    }
 }
