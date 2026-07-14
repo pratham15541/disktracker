@@ -6,11 +6,16 @@
 
 ## Current Active Loop
 
-None (Epoch 2 Completed)
+None (Epoch 3 is in the planning/spec stage — no implementation loops have been started
+against AI_MASTER_PLAN_EPOCH3.md yet; both amendments so far are spec-only sessions).
 
 ## Next Action
 
-N/A (Ready for Epoch 3 or user review)
+Begin Epoch 3 implementation. Before starting, resolve the Loop-numbering collision
+flagged under "Open Issues" below — Epoch 3's §8 ("Loop 12 Test Invariants") reuses a loop
+number already closed out under Epoch 2 (Windows Service, closed 2026-07-11). Do not
+silently assume which loop count is intended; confirm with the user or amend the Epoch 3
+doc to renumber before logging implementation work here.
 
 ---
 
@@ -46,9 +51,30 @@ correlation work belongs to a later epoch and is not tracked in this table.
 | 11 — Top | Completed | yes | Antigravity | 2026-07-13 |
 | 12 — Windows Service auto-start & management | Completed | yes | Antigravity | 2026-07-11 |
 
-_Update this table every time a loop is verified. "Verified on Windows?" must be an actual
-yes/no based on a real manual test on native Windows, not on the code compiling in WSL._
+_Note on the last row: the 2026-07-14 spinner/Top-optimization session verified clean
+compilation and passing unit tests, but the session log entry for it does not record an
+explicit native-Windows manual run. Flagged under "Open Issues" below rather than marked
+"yes" without evidence.
 
+All six Epoch 2 loops are verified complete; Epoch 2 is closed as of this session pending
+resolution of the open item above.
+
+## Epoch 3 — Loop Status (planning stage, not yet started)
+
+Scope (per AI_MASTER_PLAN_3.md): disktracker ask "<question>" — natural-language
+orchestration over the SQLite knowledge graph and OS, dual-mode (Exploratory read-only /
+Action --interactive read-write with HITL), ETW install-time + runtime tracking, a
+rust-langgraph-based Rust agent runtime, and multi-turn session persistence.
+
+No implementation loops have been opened yet — both amendments to date are spec-only. The
+Epoch 3 document does not yet lay out an explicit Loop 1..N build plan the way Epoch 1 (§8)
+and Epoch 2 (§10) do; it only defines architecture (§1–§7) and a single verification
+checklist in §8 ("Loop 12 Test Invariants"). Until that's reconciled (see Open Issues), this
+table intentionally has no rows.
+
+| Loop | Status | Verified on Windows? | Model(s) used | Date |
+|------|--------|----------------------|---------------|------|
+| (none opened yet) | - | - | - | - |
 
 ## Known Deviations from AI_MASTER_PLAN.md
 

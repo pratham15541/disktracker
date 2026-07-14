@@ -2,7 +2,7 @@
 
 These two prompts are how you start and end every AI coding session, regardless of which
 model you're using (Antigravity/Gemini, Claude, etc.). They rely entirely on
-`docs/AI_MASTER_PLAN_2.md`, `docs/EPOCH-2.md`  and `docs/PROGRESS.md` — never re-paste the architecture into chat.
+`docs/AI_MASTER_PLAN_3.md`  and `docs/PROGRESS.md` — never re-paste the architecture into chat.
 Main
 
 ## Boot Sequence Prompt (start of every session)
