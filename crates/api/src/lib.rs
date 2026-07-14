@@ -2,6 +2,7 @@ mod drain;
 pub mod search;
 pub mod history;
 pub mod snapshots;
+pub mod top;
 use tantivy::schema::Value;
 
 use core_types::{
@@ -788,7 +789,7 @@ async fn handle_request(
                         }
                     }
 
-                    for doc in docs {
+                    for (doc, doc_score) in docs {
                         let doc_name = doc
                             .get_first(si.name)
                             .and_then(|v| v.as_str())
@@ -839,6 +840,7 @@ async fn handle_request(
                             "is_directory": doc_is_dir,
                             "file_id": doc_file_id,
                             "attributes": doc_attrs,
+                            "score": doc_score,
                         }));
                     }
 
@@ -870,6 +872,9 @@ async fn handle_request(
         "snapshot_diff" => {
             map_rpc_result(req.id, snapshots::handle_snapshot_diff(req.params))
         }
+        "get_top" => {
+            map_rpc_result(req.id, top::handle_get_top(req.params))
+        }
         "get_search_rebuild_status" => {
             let in_progress = search::REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst);
             let progress = search::REBUILD_PROGRESS_COUNT.load(std::sync::atomic::Ordering::SeqCst);
@@ -880,6 +885,40 @@ async fn handle_request(
                     "progress": progress
                 }),
             )
+        }
+        "uninstall_cleanup" => {
+            let delete_snapshot = req.params.get("delete_snapshot").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            if let Ok(db_dir) = storage::get_db_dir() {
+                let mut config_path = db_dir.clone();
+                config_path.push("config.toml");
+                if config_path.exists() {
+                    let _ = std::fs::remove_file(&config_path);
+                }
+            }
+
+            match storage::get_db_connection() {
+                Ok(conn) => {
+                    let _ = conn.execute("DELETE FROM facts", []);
+                    let _ = conn.execute("DELETE FROM mutation_log", []);
+                    let _ = conn.execute("DELETE FROM drain_state", []);
+                    let _ = conn.execute("DELETE FROM pruning_log", []);
+                    if delete_snapshot {
+                        let _ = conn.execute("DELETE FROM volume_snapshots", []);
+                        let _ = conn.execute("DELETE FROM parent_snapshots", []);
+                    }
+                    let _ = conn.execute("VACUUM", []);
+                }
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32603,
+                        format!("Failed to connect to database for cleanup: {}", e),
+                    );
+                }
+            }
+
+            JsonRpcResponse::success(req.id, serde_json::json!({ "status": "ok" }))
         }
         _ => JsonRpcResponse::error(req.id, -32601, format!("Method not found: {}", req.method)),
     }
@@ -927,6 +966,28 @@ fn map_rpc_result(id: Option<serde_json::Value>, res: Result<serde_json::Value, 
                     Some(serde_json::json!({
                         "code": "E_SNAPSHOT_DATA_EXPIRED",
                         "retention": config_mgr::load_config().retention
+                    }))
+                )
+            } else if err.starts_with("E_INSUFFICIENT_HISTORY:") {
+                let parts: Vec<&str> = err.trim_start_matches("E_INSUFFICIENT_HISTORY:").split(':').collect();
+                let days_available = parts.get(0).and_then(|p| p.parse::<f64>().ok()).unwrap_or(0.0);
+                let days_needed = parts.get(1).and_then(|p| p.parse::<f64>().ok()).unwrap_or(0.0);
+                let diff_days = (days_needed - days_available).max(0.0);
+                let avail_int = days_available as i64;
+                let needed_diff_int = diff_days.ceil() as i64;
+                let msg = format!(
+                    "DiskTracker needs a bit more history for this — you have {} days, come back in {} more.",
+                    avail_int,
+                    needed_diff_int
+                );
+                JsonRpcResponse::error_with_data(
+                    id,
+                    -32004,
+                    msg,
+                    Some(serde_json::json!({
+                        "code": "E_INSUFFICIENT_HISTORY",
+                        "days_available": avail_int,
+                        "days_needed": days_needed as i64
                     }))
                 )
             } else {

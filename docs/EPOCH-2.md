@@ -304,11 +304,6 @@ disktracker top --since 7d
 disktracker top --between before-update after-cleanup
 ```
 
-**Gate message — exact text (see master plan §9 for the general template):**
-```
-DiskTracker needs a bit more history for growth trends — you have 2 days, come back in
-5 more.
-```
 
 **Errors:** `E_INSUFFICIENT_HISTORY`, `E_NOT_FOUND` (unknown snapshot in `--between`),
 `E_INVALID_PARAMS` (both `--since`/`--between`, or both `--growth`/`--churn`, given together).

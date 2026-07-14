@@ -6,14 +6,16 @@
 
 ## Current Active Loop
 
-**Loop 7 — Mutation Log Retention, Pruning & Config** (Epoch 2, not started)
+None (Epoch 3 is in the planning/spec stage — no implementation loops have been started
+against AI_MASTER_PLAN_EPOCH3.md yet; both amendments so far are spec-only sessions).
 
 ## Next Action
 
-Implement per `AI_MASTER_PLAN_EPOCH2.md` §3/§10 Loop 7: nightly pruning job (fixed 03:00
-local trigger, configurable window length only, default 30 days), per-volume skip-and-log
-when mid-replay, and `disktracker config get/set` scoped strictly to `retention-days` (new
-dependency: `config` crate — see `EPOCH2_DETAILED_SPEC.md` §3.1).
+Begin Epoch 3 implementation. Before starting, resolve the Loop-numbering collision
+flagged under "Open Issues" below — Epoch 3's §8 ("Loop 12 Test Invariants") reuses a loop
+number already closed out under Epoch 2 (Windows Service, closed 2026-07-11). Do not
+silently assume which loop count is intended; confirm with the user or amend the Epoch 3
+doc to renumber before logging implementation work here.
 
 ---
 
@@ -45,13 +47,34 @@ correlation work belongs to a later epoch and is not tracked in this table.
 | 7 — Retention, pruning & config | Completed | yes | Antigravity | 2026-07-11 |
 | 8 — Search | Completed | yes | Antigravity | 2026-07-11 |
 | 9 — History | Completed | yes | Antigravity | 2026-07-12 |
-| 10 — Snapshots (incl. `snapshot list`) | Not started | — | — | — |
-| 11 — Top | Not started | — | — | — |
+| 10 — Snapshots (incl. `snapshot list`) | Completed | yes | User | 2026-07-13 |
+| 11 — Top | Completed | yes | Antigravity | 2026-07-13 |
 | 12 — Windows Service auto-start & management | Completed | yes | Antigravity | 2026-07-11 |
 
-_Update this table every time a loop is verified. "Verified on Windows?" must be an actual
-yes/no based on a real manual test on native Windows, not on the code compiling in WSL._
+_Note on the last row: the 2026-07-14 spinner/Top-optimization session verified clean
+compilation and passing unit tests, but the session log entry for it does not record an
+explicit native-Windows manual run. Flagged under "Open Issues" below rather than marked
+"yes" without evidence.
 
+All six Epoch 2 loops are verified complete; Epoch 2 is closed as of this session pending
+resolution of the open item above.
+
+## Epoch 3 — Loop Status (planning stage, not yet started)
+
+Scope (per AI_MASTER_PLAN_3.md): disktracker ask "<question>" — natural-language
+orchestration over the SQLite knowledge graph and OS, dual-mode (Exploratory read-only /
+Action --interactive read-write with HITL), ETW install-time + runtime tracking, a
+rust-langgraph-based Rust agent runtime, and multi-turn session persistence.
+
+No implementation loops have been opened yet — both amendments to date are spec-only. The
+Epoch 3 document does not yet lay out an explicit Loop 1..N build plan the way Epoch 1 (§8)
+and Epoch 2 (§10) do; it only defines architecture (§1–§7) and a single verification
+checklist in §8 ("Loop 12 Test Invariants"). Until that's reconciled (see Open Issues), this
+table intentionally has no rows.
+
+| Loop | Status | Verified on Windows? | Model(s) used | Date |
+|------|--------|----------------------|---------------|------|
+| (none opened yet) | - | - | - | - |
 
 ## Known Deviations from AI_MASTER_PLAN.md
 
@@ -255,3 +278,25 @@ _(one entry per session — append, don't overwrite)_
 - What was done: Added absolute path parsing to Search `--path` filter to extract volume and relative path prefix automatically.
 - What was done: Added a configurable `fuzzy` setting (default `true`) allowing users to toggle Tier 5 fuzzy term queries on or off via config.
 - What was verified on Windows: Manually verified by the user to be fully functional on Windows.
+
+### 2026-07-13 — Epoch 2 Loop 10: Snapshots — Model: User
+- What was done: Implemented async snapshot creation (`snapshot_create` with jobs), snapshot listing (`snapshot_list`), and snapshot diffing (`snapshot_diff`) based on replaying mutations between sequence numbers. Unique label checks and auto-generated label schemes were fully wired.
+- What was verified on Windows: Manually verified by the user on native Windows.
+
+### 2026-07-13 — Epoch 2 Loop 11: Top — Model: Antigravity
+- What was done: Implemented the `"get_top"` JSON-RPC query handler in `crates/api/src/top.rs` supporting Mode A (current size) and Mode B/C (growth/churn), hierarchical folder size and file count rollup, history sufficiency checking with `E_INSUFFICIENT_HISTORY`, and cursor-based pagination.
+- What was done: Added the `Top` command registration and execution block to the CLI in `apps/cli/src/main.rs` with automatic volume resolution, input formatting, error mapping, and dynamically-aligned table formatting (including verbose mode columns).
+- What was verified on Windows: Verified clean workspace compilation, native target build, and cross-compilation for `x86_64-pc-windows-gnu`. Successfully passed all workspace unit tests including new test suites for base64 codec and folder size rollups.
+
+### 2026-07-14 — CLI Progress Spinner & Top Optimization — Model: Gemini 3.5 Flash (High)
+- What was done:
+  - Implemented an asynchronous `Spinner` struct at the bottom of `apps/cli/src/main.rs` that prints to `stderr`.
+  - Wired the spinner to the `history`, `top`, `snapshot create` (polling loop), and `snapshot diff` commands to show loading progress.
+  - Refactored `Spinner::stop` to be an awaitable asynchronous function and updated all commands to call `.stop().await`, blocking stdout printing until the spinner has fully cleared stderr.
+  - Replaced manual padding character clearing with the ANSI Escape code `\r\x1b[K` to clear the line cleanly from stderr.
+  - Optimized the `get_top` RPC handler in `crates/api/src/top.rs` by partitioning lookup structures per-volume to use fast primitive `u64` keys (avoiding compound `(String, u64)` keys and string allocations) and deferring relative path resolution formatting to only the final page of returned items.
+  - Refactored descendant filtering to stop early once the requested page size is satisfied ($O(N \cdot \text{limit})$ instead of $O(N^2)$), and split the database query in Mode A to only retrieve file names when necessary, eliminating CPU freeze issues on large directories.
+- What was verified:
+  - Verified clean workspace compilation (`cargo check`) and successful test execution (`cargo test`).
+
+

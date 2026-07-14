@@ -13,7 +13,6 @@ platform-windows = { path = "../../crates/platform/windows" }
 core-types = { path = "../../crates/core" }
 api = { path = "../../crates/api" }
 storage = { path = "../../crates/storage" }
-rusqlite = { version = "0.31", features = ["bundled"] }
 config-mgr = { path = "../../crates/config" }
 chrono = "0.4"
 
