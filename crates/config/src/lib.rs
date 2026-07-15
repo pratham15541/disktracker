@@ -17,6 +17,12 @@ pub struct AppConfig {
         alias = "auto-snapshot-interval"
     )]
     pub auto_snapshot_interval: String,
+    #[serde(default = "default_ai_base_url", alias = "base-url")]
+    pub ai_base_url: Option<String>,
+    #[serde(default = "default_ai_model", alias = "model")]
+    pub ai_model: Option<String>,
+    #[serde(default = "default_ai_chat_session_store", alias = "chat-session-store")]
+    pub ai_chat_session_store: bool,
 }
 
 fn default_fuzzy() -> bool {
@@ -29,6 +35,18 @@ fn default_auto_snapshot() -> bool {
 
 fn default_auto_snapshot_interval() -> String {
     "24h".to_string()
+}
+
+fn default_ai_base_url() -> Option<String> {
+    None
+}
+
+fn default_ai_model() -> Option<String> {
+    None
+}
+
+fn default_ai_chat_session_store() -> bool {
+    false
 }
 
 fn deserialize_retention<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -82,6 +100,9 @@ impl Default for AppConfig {
             fuzzy: true,
             auto_snapshot: false,
             auto_snapshot_interval: "24h".to_string(),
+            ai_base_url: None,
+            ai_model: None,
+            ai_chat_session_store: false,
         }
     }
 }

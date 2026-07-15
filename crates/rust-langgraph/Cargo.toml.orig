@@ -1,0 +1,105 @@
+[package]
+name = "rust-langgraph"
+version = "0.1.1"
+edition = "2021"
+authors = ["Rust LangGraph contributors"]
+description = """
+Stateful graph runtime for LLM workflows in Rust (community project; not affiliated with LangChain).
+Pregel-style execution: nodes, conditional edges, checkpoints, streaming. Optional adapters for
+Ollama, OpenAI, OpenRouter (OpenAI-compatible), and Anthropic; optional ReAct agent + tools.
+Crate import: rust_langgraph (underscore). Default features include in-memory checkpoints.
+Enable Cargo features explicitly for LLM modules (e.g. ollama, openai, openrouter, anthropic, prebuilt).
+See README.md on crates.io for copy-paste Cargo.toml, env vars, and common mistakes.
+"""
+license = "MIT"
+repository = "https://github.com/kareem2002-k/rust-langgraph"
+documentation = "https://docs.rs/rust-langgraph"
+keywords = ["langgraph", "llm", "agent", "workflow", "async"]
+categories = ["asynchronous", "web-programming"]
+readme = "README.md"
+
+[features]
+default = ["memory-checkpoint"]
+memory-checkpoint = []
+sqlite = ["dep:sqlx", "sqlx/sqlite", "sqlx/runtime-tokio"]
+postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/runtime-tokio"]
+openai = ["dep:reqwest", "dep:async-openai"]
+openrouter = ["dep:reqwest", "dep:async-openai"]
+anthropic = ["dep:reqwest"]
+ollama = ["dep:reqwest"]
+prebuilt = []
+
+[dependencies]
+# Core async runtime
+tokio = { version = "1.40", features = ["full"] }
+tokio-stream = "0.1"
+async-trait = "0.1"
+futures = "0.3"
+pin-project = "1.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+
+# UUID generation for checkpoints
+uuid = { version = "1.10", features = ["v4", "serde"] }
+
+# Date/time for timestamps
+chrono = { version = "0.4", features = ["serde"] }
+
+# Optional database support
+sqlx = { version = "0.8", optional = true, features = ["json"] }
+
+# Optional HTTP client for LLM providers
+reqwest = { version = "0.12", optional = true, features = ["json"] }
+async-openai = { version = "0.24", optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+proptest = "1.5"
+
+[lib]
+name = "rust_langgraph"
+path = "src/lib.rs"
+
+[[example]]
+name = "simple_graph"
+path = "examples/01_simple_graph.rs"
+
+[[example]]
+name = "conditional_edges"
+path = "examples/02_conditional_edges.rs"
+
+[[example]]
+name = "checkpointing"
+path = "examples/03_checkpointing.rs"
+
+[[example]]
+name = "streaming"
+path = "examples/04_streaming.rs"
+
+[[example]]
+name = "ollama_chat"
+path = "examples/05_ollama_chat.rs"
+required-features = ["ollama"]
+
+[[example]]
+name = "react_agent_ollama"
+path = "examples/06_react_agent_ollama.rs"
+required-features = ["ollama", "prebuilt"]
+
+[[example]]
+name = "custom_state"
+path = "examples/08_custom_state.rs"
+
+[[example]]
+name = "openrouter_chat"
+path = "examples/07_openrouter_chat.rs"
+required-features = ["openrouter"]

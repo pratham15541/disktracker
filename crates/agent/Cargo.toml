@@ -1,0 +1,19 @@
+[package]
+name = "agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rust-langgraph = { version = "0.1.1", features = ["openai", "openrouter", "prebuilt", "sqlite"] }
+keyring = "4.1"
+config-mgr = { path = "../config" }
+storage = { path = "../storage" }
+core-types = { path = "../core" }
+chrono = "0.4"
+reqwest = { version = "0.12", features = ["json"] }
+platform-windows = { path = "../platform/windows" }
+rusqlite = { version = "0.31", features = ["bundled"] }
+

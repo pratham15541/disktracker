@@ -179,6 +179,25 @@ enum Commands {
         #[command(subcommand)]
         subcommand: SnapshotCommands,
     },
+    /// Manage the AI orchestration system and conversational sessions
+    Ai {
+        #[command(subcommand)]
+        subcommand: AiCommands,
+    },
+    /// Ask a natural language question about the disk or filesystem state
+    Ask {
+        /// The natural language question to ask the AI agent
+        question: String,
+        /// Enable interactive Action mode (allows mutations with HITL approval)
+        #[arg(long, short = 'i')]
+        interactive: bool,
+        /// Store this conversation session
+        #[arg(long)]
+        store_this_session: bool,
+        /// Resume a previous conversation session by ID
+        #[arg(long)]
+        session: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -250,6 +269,44 @@ enum SnapshotCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum AiCommands {
+    /// View or modify AI configuration (stored in config.toml and Credential Manager)
+    Config {
+        /// Set the AI endpoint base URL
+        #[arg(long)]
+        base_url: Option<String>,
+        /// Set the API authorization token (committed to Credential Manager)
+        #[arg(long)]
+        api_key: Option<String>,
+        /// Set the LLM model name (e.g. gpt-4o)
+        #[arg(long)]
+        model: Option<String>,
+        /// Record chat sessions by default (true or false)
+        #[arg(long)]
+        chat_session_store: Option<bool>,
+    },
+    /// Run a structural handshake check with the configured AI provider
+    Test,
+    /// Manage saved conversational sessions
+    Session {
+        #[command(subcommand)]
+        subcommand: AiSessionCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum AiSessionCommands {
+    /// List all saved investigation sessions
+    List,
+    /// Show full transcript of a specific session
+    Show {
+        /// The session ID
+        id: String,
+    },
+}
+
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
@@ -258,15 +315,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Daemon { service } => {
             #[cfg(windows)]
             {
-                if !platform_windows::is_elevated() {
-                    print_error(
-                        cli.json,
-                        "E_NOT_ELEVATED",
-                        "DiskTracker daemon must be run with Administrator privileges.",
-                        None,
-                    );
-                    std::process::exit(1);
-                }
+                require_admin("daemon", &["daemon"], cli.json);
             }
 
             if *service {
@@ -300,15 +349,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Init => {
             #[cfg(windows)]
             {
-                if !platform_windows::is_elevated() {
-                    print_error(
-                        cli.json,
-                        "E_NOT_ELEVATED",
-                        "DiskTracker must be run as Administrator/elevated terminal on Windows to watch drives.",
-                        None,
-                    );
-                    std::process::exit(1);
-                }
+                require_admin("init", &["init"], cli.json);
             }
 
             // 1. Check if daemon is already running
@@ -492,9 +533,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         Commands::Doctor => {
+            #[cfg(windows)]
+            {
+                require_admin("doctor", &["doctor"], cli.json);
+            }
             run_doctor().await;
         }
         Commands::Uninstall { delete_snapshot, yes } => {
+            #[cfg(windows)]
+            {
+                // Build relaunch args that preserve flags the user already passed.
+                let mut relaunch: Vec<&str> = vec!["uninstall"];
+                if *delete_snapshot { relaunch.push("--delete-snapshot"); }
+                if *yes             { relaunch.push("--yes"); }
+                require_admin("uninstall", &relaunch, cli.json);
+            }
             if let Err(e) = run_uninstall(*delete_snapshot, *yes).await {
                 eprintln!("[Cli] Uninstall failed: {:?}", e);
                 std::process::exit(1);
@@ -2290,6 +2343,275 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::Ai { subcommand } => match subcommand {
+            AiCommands::Config { base_url, api_key, model, chat_session_store } => {
+                if base_url.is_none() && api_key.is_none() && model.is_none() && chat_session_store.is_none() {
+                    let cfg = config_mgr::load_config();
+                    let key_status = match agent::get_api_key() {
+                        Ok(_) => "Set (Present in Credential Store)",
+                        Err(_) => "Not Set",
+                    };
+                    if cli.json {
+                        println!("{}", serde_json::json!({
+                            "base_url": cfg.ai_base_url,
+                            "model": cfg.ai_model,
+                            "chat_session_store": cfg.ai_chat_session_store,
+                            "api_key_status": key_status
+                        }));
+                    } else {
+                        println!("AI Base URL: {}", cfg.ai_base_url.as_deref().unwrap_or("<not configured>"));
+                        println!("AI Model: {}", cfg.ai_model.as_deref().unwrap_or("<not configured>"));
+                        println!("AI Chat Session Store: {}", cfg.ai_chat_session_store);
+                        println!("AI API Key Status: {}", key_status);
+                    }
+                } else {
+                    if let Some(ref key) = api_key {
+                        if let Err(e) = agent::set_api_key(key) {
+                            eprintln!("Error saving API key: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
+                    if let Err(e) = agent::update_ai_config(
+                        base_url.clone(),
+                        model.clone(),
+                        *chat_session_store,
+                    ) {
+                        eprintln!("Error saving AI configuration: {}", e);
+                        std::process::exit(1);
+                    }
+                    if !cli.json {
+                        println!("AI configuration updated successfully.");
+                    } else {
+                        println!("{}", serde_json::json!({"status": "success"}));
+                    }
+                }
+            }
+            AiCommands::Test => {
+                if !cli.json {
+                    println!("Initiating structural AI connectivity handshake...");
+                }
+                match agent::run_ai_test().await {
+                    Ok(_) => {
+                        if !cli.json {
+                            println!("  [OK] Handshake completed successfully. Connectivity is verified.");
+                        } else {
+                            println!("{}", serde_json::json!({"status": "success"}));
+                        }
+                    }
+                    Err(e) => {
+                        if !cli.json {
+                            eprintln!("  [FAILED] Handshake failed: {}", e);
+                        } else {
+                            println!("{}", serde_json::json!({"status": "error", "message": e}));
+                        }
+                        std::process::exit(1);
+                    }
+                }
+            }
+            AiCommands::Session { subcommand } => match subcommand {
+                AiSessionCommands::List => {
+                    match agent::session_store::list_sessions() {
+                        Ok(sessions) => {
+                            if cli.json {
+                                let list: Vec<_> = sessions.iter().map(|(id, created, q)| {
+                                    serde_json::json!({
+                                        "id": id,
+                                        "created_at": created,
+                                        "first_question": q
+                                    })
+                                }).collect();
+                                println!("{}", serde_json::to_string_pretty(&list).unwrap());
+                            } else {
+                                if sessions.is_empty() {
+                                    println!("No saved AI sessions found.");
+                                } else {
+                                    println!("{:<12} | {:<22} | {}", "Session ID", "Created At", "First Question");
+                                    println!("{:-<12}-+-{:-<22}-+-{:-<30}", "", "", "");
+                                    for (id, created, q) in sessions {
+                                        let q_disp = if q.len() > 60 { format!("{}...", &q[..57]) } else { q };
+                                        println!("{:<12} | {:<22} | {}", id, created, q_disp);
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            if cli.json {
+                                print_error(true, "E_SESSION_STORE", &e, None);
+                            } else {
+                                eprintln!("Error: {}", e);
+                            }
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                AiSessionCommands::Show { id } => {
+                    match agent::session_store::load_session(id) {
+                        Ok(Some(state)) => {
+                            if cli.json {
+                                println!("{}", serde_json::to_string_pretty(&state).unwrap());
+                            } else {
+                                println!("=== Session Transcript: {} ===", id);
+                                println!("Initial Question: {}\n", state.question);
+                                for msg in &state.messages {
+                                    if msg.role == "system" {
+                                        continue;
+                                    }
+                                    let role_cap = match msg.role.as_str() {
+                                        "user" => "User".to_string(),
+                                        "assistant" => "Assistant".to_string(),
+                                        "tool" => "Tool".to_string(),
+                                        _ => msg.role.to_string(),
+                                    };
+                                    println!("\x1b[1m{}:\x1b[0m {}", role_cap, msg.content);
+                                    if let Some(tool_calls) = &msg.tool_calls {
+                                        for tc in tool_calls {
+                                            println!("  └─ Tool Call: {}({})", tc.name, tc.arguments);
+                                        }
+                                    }
+                                    if let Some(tool_call_id) = &msg.tool_call_id {
+                                        println!("  └─ Tool Response ID: {}", tool_call_id);
+                                    }
+                                    println!();
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            let err_msg = format!("Session ID '{}' not found.", id);
+                            if cli.json {
+                                print_error(true, "E_SESSION_NOT_FOUND", &err_msg, None);
+                            } else {
+                                eprintln!("Error: {}", err_msg);
+                            }
+                            std::process::exit(1);
+                        }
+                        Err(e) => {
+                            if cli.json {
+                                print_error(true, "E_SESSION_STORE", &e, None);
+                            } else {
+                                eprintln!("Error: {}", e);
+                            }
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Ask { question, interactive, store_this_session, session } => {
+            if let Err(e) = agent::check_ai_configuration_validity() {
+                if cli.json {
+                    print_error(true, "E_INVALID_PARAMS", &e, None);
+                } else {
+                    eprintln!("{}", e);
+                }
+                std::process::exit(1);
+            }
+
+            let loaded_state = if let Some(ref session_id) = session {
+                match agent::session_store::load_session(session_id) {
+                    Ok(Some(state)) => Some(state),
+                    Ok(None) => {
+                        let err_msg = format!("Session ID '{}' not found.", session_id);
+                        if cli.json {
+                            print_error(true, "E_SESSION_NOT_FOUND", &err_msg, None);
+                        } else {
+                            eprintln!("Error: {}", err_msg);
+                        }
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        let err_msg = format!("Failed to load session: {}", e);
+                        if cli.json {
+                            print_error(true, "E_SESSION_STORE", &err_msg, None);
+                        } else {
+                            eprintln!("Error: {}", err_msg);
+                        }
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                None
+            };
+
+            let active_session_id = session.clone().unwrap_or_else(|| {
+                use rand::Rng;
+                let mut rng = rand::thread_rng();
+                let val: u32 = rng.gen();
+                format!("{:08x}", val)
+            });
+
+            let mut spinner = if cli.json {
+                None
+            } else {
+                Some(Spinner::start("Agent is thinking...".to_string()))
+            };
+
+            match agent::run_agent_query(question, *interactive, loaded_state).await {
+                Ok(result) => {
+                    if let Some(s) = spinner.take() {
+                        s.stop().await;
+                    }
+
+                    let stopped_prematurely = result.round_count >= 6;
+                    let answer = result.final_answer.clone().unwrap_or_else(|| "No final answer could be generated.".to_string());
+                    
+                    let cfg = config_mgr::load_config();
+                    let should_save = cfg.ai_chat_session_store || *store_this_session;
+                    
+                    if should_save {
+                        let first_q = result.messages.iter()
+                            .find(|m| m.role == "user")
+                            .map(|m| m.content.as_str())
+                            .unwrap_or(question);
+                            
+                        if let Err(e) = agent::session_store::save_session(&active_session_id, first_q, &result) {
+                            eprintln!("\nWarning: Failed to save session: {}", e);
+                        }
+                    }
+
+                    if cli.json {
+                        let mut json_val = serde_json::json!({
+                            "question": question,
+                            "answer": answer,
+                            "data_used": result.data_used,
+                            "stopped_prematurely": stopped_prematurely
+                        });
+                        if should_save {
+                            json_val["session_id"] = serde_json::json!(active_session_id);
+                        }
+                        println!("{}", serde_json::to_string_pretty(&json_val).unwrap());
+                    } else {
+                        if stopped_prematurely {
+                            println!("\x1b[33m(Investigation stopped after 6 tool calls — this may be incomplete.)\x1b[0m\n");
+                        }
+                        
+                        println!("{}", answer);
+
+                        if !result.data_used.is_empty() {
+                            println!("\n\x1b[1mData used:\x1b[0m");
+                            for (idx, entry) in result.data_used.iter().enumerate() {
+                                println!("{}. {}", idx + 1, entry);
+                            }
+                        }
+
+                        if should_save {
+                            println!("\n[Session ID: {} saved. Use --session {} to continue.]", active_session_id, active_session_id);
+                        }
+                    }
+                }
+                Err(e) => {
+                    if let Some(s) = spinner.take() {
+                        s.stop().await;
+                    }
+                    if cli.json {
+                        print_error(true, "E_AGENT_FAILED", &e, None);
+                    } else {
+                        eprintln!("Error: {}", e);
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
+
     }
 
     Ok(())
@@ -2764,6 +3086,75 @@ fn print_error(json: bool, code: &str, message: &str, details: Option<serde_json
         println!("{}", serde_json::to_string_pretty(&err_json).unwrap());
     } else {
         eprintln!("Error: {}", message);
+    }
+}
+
+/// Check elevation and, on Windows, offer to relaunch with admin privileges.
+///
+/// - `command_name`: human-readable label shown in the prompt (e.g. `"init"`).
+/// - `relaunch_args`: the raw argv slice to forward to the elevated process
+///   (e.g. `&["init"]` or `&["uninstall", "--yes"]`).
+/// - `json`: whether we are in JSON output mode (suppresses interactive prompt).
+///
+/// If not elevated:
+///   • In JSON mode → print `E_NOT_ELEVATED` JSON and `exit(1)`.
+///   • In interactive mode → ask the user:
+///       - Y/yes  → invoke ShellExecuteW runas, then `exit(0)` (elevated clone takes over).
+///       - N/no/anything else → print a plain message and `exit(1)`.
+///
+/// If already elevated, this function is a no-op.
+fn require_admin(command_name: &str, relaunch_args: &[&str], json: bool) {
+    if platform_windows::is_elevated() {
+        return;
+    }
+
+    if json {
+        // Non-interactive callers get a machine-readable error.
+        print_error(
+            true,
+            "E_NOT_ELEVATED",
+            &format!(
+                "`disktracker {}` must be run with Administrator privileges.",
+                command_name
+            ),
+            None,
+        );
+        std::process::exit(1);
+    }
+
+    // Interactive path — ask the user.
+    eprintln!(
+        "\nError: `disktracker {}` requires Administrator privileges to run.",
+        command_name
+    );
+    eprint!("Relaunch as Administrator? [Y/n]: ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+
+    let mut input = String::new();
+    let _ = std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut input);
+    let trimmed = input.trim().to_lowercase();
+
+    // Default is Y (just pressing Enter also accepts).
+    if trimmed.is_empty() || trimmed == "y" || trimmed == "yes" {
+        match platform_windows::relaunch_as_admin(relaunch_args) {
+            Ok(()) => {
+                // The UAC-elevated clone is now starting; exit this unelevated instance.
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("Failed to relaunch as Administrator: {}", e);
+                eprintln!(
+                    "Please right-click your terminal and choose \"Run as Administrator\", then try again."
+                );
+                std::process::exit(1);
+            }
+        }
+    } else {
+        eprintln!(
+            "`disktracker {}` requires Administrator privileges to run.",
+            command_name
+        );
+        std::process::exit(1);
     }
 }
 

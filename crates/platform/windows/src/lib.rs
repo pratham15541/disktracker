@@ -1135,6 +1135,72 @@ pub fn is_elevated() -> bool {
         .unwrap_or(false)
 }
 
+/// Re-launch the current process with Administrator privileges using the Windows
+/// UAC "runas" verb via ShellExecuteW.
+///
+/// - `extra_args`: additional CLI arguments to forward (the subcommand + its flags).
+///
+/// On success the UAC dialog is shown and a new elevated process starts; this function
+/// returns `Ok(())` and the caller should exit immediately so the two instances don't
+/// both try to do the same work.
+///
+/// On failure (user clicked "No" in the UAC dialog, or the exe path cannot be resolved)
+/// it returns `Err`.
+#[cfg(windows)]
+pub fn relaunch_as_admin(extra_args: &[&str]) -> std::io::Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    // Encode a wide (UTF-16) string, NUL-terminated.
+    fn wide(s: &str) -> Vec<u16> {
+        OsStr::new(s)
+            .encode_wide()
+            .chain(std::iter::once(0u16))
+            .collect()
+    }
+
+    let exe = std::env::current_exe()?;
+    let exe_str = exe
+        .to_str()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "exe path is not valid UTF-8"))?;
+
+    let verb = wide("runas");
+    let file = wide(exe_str);
+    let params_str = extra_args.join(" ");
+    let params = wide(&params_str);
+
+    let result = unsafe {
+        ShellExecuteW(
+            0,                                    // hwnd
+            verb.as_ptr(),
+            file.as_ptr(),
+            if params_str.is_empty() { std::ptr::null() } else { params.as_ptr() },
+            std::ptr::null(),                     // lpDirectory (inherit)
+            SW_SHOWNORMAL as i32,
+        )
+    };
+
+    // ShellExecuteW returns a value > 32 on success.
+    if result as usize > 32 {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("ShellExecuteW(runas) failed with code {}", result as usize),
+        ))
+    }
+}
+
+#[cfg(not(windows))]
+pub fn relaunch_as_admin(_extra_args: &[&str]) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "relaunch_as_admin is only supported on Windows",
+    ))
+}
+
 #[cfg(not(windows))]
 pub fn check_volume_usn(_volume: &str) -> std::io::Result<()> {
     Ok(())
@@ -1427,3 +1493,6 @@ pub fn stop_service() -> std::io::Result<()> {
     println!("[Unix Mock] Service stopped.");
     Ok(())
 }
+
+mod etw;
+pub use etw::start_etw_engine;

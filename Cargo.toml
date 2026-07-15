@@ -12,4 +12,9 @@ members = [
     "crates/storage",
     "crates/telemetry",
     "crates/common",
+    "crates/agent",
 ]
+
+[patch.crates-io]
+rust-langgraph = { path = "crates/rust-langgraph" }
+

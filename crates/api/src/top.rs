@@ -201,6 +201,9 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
         }
         filter_volume = Some(vol);
         filter_path_fid = Some(fid);
+    } else if let Some(ref vol) = filter_volume {
+        let (_, fid) = history::resolve_path_to_id(&conn, vol)?;
+        filter_path_fid = Some(fid);
     }
 
     let rollup_folders = if folders {
@@ -340,7 +343,7 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
 
                 for &fid in &dir_ids {
                     if let Some(ancestor_id) = filter_path_fid {
-                        if !is_descendant_u64(&parent_map, fid, ancestor_id) {
+                        if fid == ancestor_id || !is_descendant_u64(&parent_map, fid, ancestor_id) {
                             continue;
                         }
                     }
@@ -365,7 +368,7 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                 // Files mode
                 for &(fid, size) in &file_sizes {
                     if let Some(ancestor_id) = filter_path_fid {
-                        if !is_descendant_u64(&parent_map, fid, ancestor_id) {
+                        if fid == ancestor_id || !is_descendant_u64(&parent_map, fid, ancestor_id) {
                             continue;
                         }
                     }
@@ -602,7 +605,7 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                 for (&fid, &is_dir) in &is_dir_map {
                     if is_dir {
                         if let Some(ancestor_id) = filter_path_fid {
-                            if !is_descendant_u64(&parent_map, fid, ancestor_id) {
+                            if fid == ancestor_id || !is_descendant_u64(&parent_map, fid, ancestor_id) {
                                 continue;
                             }
                         }
@@ -635,7 +638,7 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                 for (&fid, &is_dir) in &is_dir_map {
                     if !is_dir {
                         if let Some(ancestor_id) = filter_path_fid {
-                            if !is_descendant_u64(&parent_map, fid, ancestor_id) {
+                            if fid == ancestor_id || !is_descendant_u64(&parent_map, fid, ancestor_id) {
                                 continue;
                             }
                         }
@@ -1045,5 +1048,105 @@ mod tests {
         assert!(is_descendant_u64(&parent_map, 3, 1)); // file1 is descendant of root
         assert!(!is_descendant_u64(&parent_map, 5, 2)); // file3 is NOT descendant of dir1
         assert!(is_descendant_u64(&parent_map, 5, 1)); // file3 is descendant of root
+    }
+
+    #[test]
+    fn test_handle_get_top_inner_filtering() {
+        let mut temp_home = std::env::temp_dir();
+        temp_home.push(format!("disktracker_test_top_{}", chrono::Utc::now().timestamp_micros()));
+        std::fs::create_dir_all(&temp_home).unwrap();
+        
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &temp_home);
+
+        let conn = storage::get_db_connection().unwrap();
+        conn.execute(
+            "CREATE TABLE facts (
+                volume TEXT NOT NULL,
+                file_id INTEGER NOT NULL,
+                parent_file_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                is_directory INTEGER NOT NULL,
+                size INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                modified_at TEXT NOT NULL,
+                attributes INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (volume, file_id)
+            )",
+            [],
+        ).unwrap();
+
+        // Populate mock facts:
+        // C: (1, parent 1)
+        // C:/dir1 (2, parent 1)
+        // C:/dir1/dir2 (3, parent 2)
+        // C:/dir1/dir2/file1.txt (4, parent 3, size 100)
+        // C:/file2.txt (5, parent 1, size 50)
+        conn.execute(
+            "INSERT INTO facts (volume, file_id, parent_file_id, name, is_directory, size, created_at, modified_at)
+             VALUES ('C:', 1, 1, 'C:', 1, 0, '2026-07-12T12:00:00Z', '2026-07-12T12:00:00Z')",
+            []
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO facts (volume, file_id, parent_file_id, name, is_directory, size, created_at, modified_at)
+             VALUES ('C:', 2, 1, 'dir1', 1, 0, '2026-07-12T12:00:00Z', '2026-07-12T12:00:00Z')",
+            []
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO facts (volume, file_id, parent_file_id, name, is_directory, size, created_at, modified_at)
+             VALUES ('C:', 3, 2, 'dir2', 1, 0, '2026-07-12T12:00:00Z', '2026-07-12T12:00:00Z')",
+            []
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO facts (volume, file_id, parent_file_id, name, is_directory, size, created_at, modified_at)
+             VALUES ('C:', 4, 3, 'file1.txt', 0, 100, '2026-07-12T12:00:00Z', '2026-07-12T12:00:00Z')",
+            []
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO facts (volume, file_id, parent_file_id, name, is_directory, size, created_at, modified_at)
+             VALUES ('C:', 5, 1, 'file2.txt', 0, 50, '2026-07-12T12:00:00Z', '2026-07-12T12:00:00Z')",
+            []
+        ).unwrap();
+
+        // 1. Query: volume "C:", folders = true
+        let params1 = serde_json::json!({
+            "volume": "C:",
+            "folders": true,
+            "limit": 10
+        });
+        let res1_val = handle_get_top(params1).unwrap();
+        let res1: TopResponse = serde_json::from_value(res1_val).unwrap();
+
+        // Expected: root "C:" (fid 1) is excluded.
+        // dir1 (size 100) is returned, while dir2 is deduplicated because it is a descendant of dir1.
+        assert_eq!(res1.results.len(), 1);
+        assert_eq!(res1.results[0].name, "dir1");
+        assert_eq!(res1.results[0].file_id, 2);
+        assert_eq!(res1.results[0].size, 100);
+        assert!(!res1.results.iter().any(|item| item.file_id == 1)); // C: is excluded
+
+        // 2. Query: path "C:/dir1", folders = true
+        let params2 = serde_json::json!({
+            "path": "C:/dir1",
+            "folders": true,
+            "limit": 10
+        });
+        let res2_val = handle_get_top(params2).unwrap();
+        let res2: TopResponse = serde_json::from_value(res2_val).unwrap();
+
+        // Expected: dir1 itself (fid 2) is excluded. Only dir2 (fid 3) is returned.
+        assert_eq!(res2.results.len(), 1);
+        assert_eq!(res2.results[0].name, "dir2");
+        assert_eq!(res2.results[0].file_id, 3);
+        assert_eq!(res2.results[0].size, 100);
+
+        // Clean up
+        drop(conn);
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        let _ = std::fs::remove_dir_all(&temp_home);
     }
 }

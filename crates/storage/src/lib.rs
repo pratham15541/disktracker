@@ -51,6 +51,56 @@ pub fn get_db_connection() -> std::result::Result<Connection, Box<dyn Error>> {
     Ok(conn)
 }
 
+/// Establish a read-only connection to the SQLite database.
+pub fn get_readonly_db_connection() -> std::result::Result<Connection, Box<dyn Error>> {
+    let mut db_path = get_db_dir()?;
+    db_path.push("disktracker.db");
+
+    let conn = Connection::open_with_flags(&db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    Ok(conn)
+}
+
+/// Executes a query on the read-only connection and returns results as an array of JSON objects.
+pub fn execute_readonly_query(query: &str) -> std::result::Result<serde_json::Value, Box<dyn Error>> {
+    let conn = get_readonly_db_connection()?;
+    let mut stmt = conn.prepare(query)?;
+    let col_count = stmt.column_count();
+    let col_names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+
+    let mut rows = stmt.query([])?;
+    let mut results = Vec::new();
+
+    while let Some(row) = rows.next()? {
+        let mut row_map = serde_json::Map::new();
+        for i in 0..col_count {
+            let val = row.get_ref(i)?;
+            let json_val = match val {
+                rusqlite::types::ValueRef::Null => serde_json::Value::Null,
+                rusqlite::types::ValueRef::Integer(n) => serde_json::Value::Number(serde_json::Number::from(n)),
+                rusqlite::types::ValueRef::Real(r) => {
+                    if let Some(num) = serde_json::Number::from_f64(r) {
+                        serde_json::Value::Number(num)
+                    } else {
+                        serde_json::Value::Null
+                    }
+                }
+                rusqlite::types::ValueRef::Text(t) => {
+                    let s = std::str::from_utf8(t).unwrap_or("");
+                    serde_json::Value::String(s.to_string())
+                }
+                rusqlite::types::ValueRef::Blob(b) => {
+                    let s = String::from_utf8_lossy(b).into_owned();
+                    serde_json::Value::String(s)
+                }
+            };
+            row_map.insert(col_names[i].clone(), json_val);
+        }
+        results.push(serde_json::Value::Object(row_map));
+    }
+
+    Ok(serde_json::Value::Array(results))
+}
+
 /// Initializes/opens the database and creates facts and mutation_log tables.
 pub fn init_db() -> std::result::Result<PathBuf, Box<dyn Error>> {
     let mut db_path = get_db_dir()?;
@@ -176,7 +226,57 @@ pub fn init_db() -> std::result::Result<PathBuf, Box<dyn Error>> {
         [],
     )?;
 
+    // Create app_install_footprints table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS app_install_footprints (
+            app_name TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            install_time TEXT NOT NULL,
+            PRIMARY KEY (app_name, file_path)
+        )",
+        [],
+    )?;
+
+    // Create app_runtime_artifacts table
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS app_runtime_artifacts (
+            process_name TEXT NOT NULL,
+            target_path TEXT NOT NULL,
+            access_time TEXT NOT NULL,
+            PRIMARY KEY (process_name, target_path)
+        )",
+        [],
+    )?;
+
     Ok(db_path)
+}
+
+pub fn insert_app_install_footprint(
+    app_name: &str,
+    file_path: &str,
+) -> std::result::Result<(), Box<dyn Error>> {
+    let conn = get_db_connection()?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR REPLACE INTO app_install_footprints (app_name, file_path, install_time)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![app_name, file_path, now],
+    )?;
+    Ok(())
+}
+
+pub fn insert_app_runtime_artifact(
+    process_name: &str,
+    target_path: &str,
+) -> std::result::Result<(), Box<dyn Error>> {
+    let conn = get_db_connection()?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT OR REPLACE INTO app_runtime_artifacts (process_name, target_path, access_time)
+         VALUES (?1, ?2, ?3)",
+        rusqlite::params![process_name, target_path, now],
+    )?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -428,3 +528,92 @@ pub fn get_latest_pruning_runs() -> std::result::Result<Vec<PruningLogEntry>, Bo
     }
     Ok(results)
 }
+
+pub fn delete_snapshot_db(label_or_id: &str) -> std::result::Result<(), Box<dyn Error>> {
+    let conn = get_db_connection()?;
+    conn.execute("PRAGMA foreign_keys = ON", [])?;
+    let rows_affected = conn.execute(
+        "DELETE FROM parent_snapshots WHERE id = ?1 OR label = ?1",
+        [label_or_id],
+    )?;
+    if rows_affected == 0 {
+        return Err("Snapshot not found".into());
+    }
+    Ok(())
+}
+
+pub fn load_whitelist() -> std::result::Result<serde_json::Value, Box<dyn Error>> {
+    let mut path = get_db_dir()?;
+    path.push("whitelist.json");
+    if !path.exists() {
+        let defaults = serde_json::json!({
+            "read": ["dir", "ls", "df", "du", "cat", "ps", "free", "get-childitem", "get-item", "get-itemproperty", "get-process", "get-service", "type"],
+            "write": ["rm", "del", "remove-item", "rmdir", "erase"]
+        });
+        fs::write(&path, serde_json::to_string_pretty(&defaults)?)?;
+        return Ok(defaults);
+    }
+    let data = fs::read_to_string(&path)?;
+    let val: serde_json::Value = serde_json::from_str(&data)?;
+    Ok(val)
+}
+
+pub fn save_whitelist(whitelist: &serde_json::Value) -> std::result::Result<(), Box<dyn Error>> {
+    let mut path = get_db_dir()?;
+    path.push("whitelist.json");
+    fs::write(&path, serde_json::to_string_pretty(whitelist)?)?;
+    Ok(())
+}
+
+pub fn load_signatures() -> std::result::Result<serde_json::Value, Box<dyn Error>> {
+    let mut path = get_db_dir()?;
+    path.push("signatures.json");
+    if !path.exists() {
+        let defaults = serde_json::json!({
+            "glcache": "GLCache is an NVIDIA shader cache; safe to delete.",
+            "deriveddatacache": "DerivedDataCache is an Unreal Engine shader/asset cache; safe to delete.",
+            "appdata\\local\\temp": "Temporary folder containing transient session files; safe to delete.",
+            "tmp": "Temporary folder containing transient session files; safe to delete.",
+            "steam": "Steam library or configuration files. Deleting this may uninstall games or disrupt client login.",
+            "windows": "Critical operating system files. NEVER delete or mutate files in this directory.",
+            "system32": "Critical operating system files. NEVER delete or mutate files in this directory."
+        });
+        fs::write(&path, serde_json::to_string_pretty(&defaults)?)?;
+        return Ok(defaults);
+    }
+    let data = fs::read_to_string(&path)?;
+    let val: serde_json::Value = serde_json::from_str(&data)?;
+    Ok(val)
+}
+
+pub fn save_signatures(sigs: &serde_json::Value) -> std::result::Result<(), Box<dyn Error>> {
+    let mut path = get_db_dir()?;
+    path.push("signatures.json");
+    fs::write(&path, serde_json::to_string_pretty(sigs)?)?;
+    Ok(())
+}
+
+pub fn find_footprint_association(path_str: &str) -> std::result::Result<Option<(String, String)>, Box<dyn Error>> {
+    let conn = get_db_connection()?;
+    
+    // Check install footprints
+    let mut stmt = conn.prepare("SELECT app_name FROM app_install_footprints WHERE file_path = ?1 OR ?1 LIKE file_path || '%' LIMIT 1")?;
+    let mut rows = stmt.query([path_str])?;
+    if let Some(row) = rows.next()? {
+        let app_name: String = row.get(0)?;
+        return Ok(Some((app_name, "install".to_string())));
+    }
+    
+    // Check runtime footprints
+    let mut stmt2 = conn.prepare("SELECT process_name FROM app_runtime_artifacts WHERE file_path = ?1 OR ?1 LIKE file_path || '%' LIMIT 1")?;
+    let mut rows2 = stmt2.query([path_str])?;
+    if let Some(row) = rows2.next()? {
+        let proc_name: String = row.get(0)?;
+        return Ok(Some((proc_name, "runtime".to_string())));
+    }
+    
+    Ok(None)
+}
+
+
+
