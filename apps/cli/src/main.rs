@@ -966,6 +966,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
 
+                                #[allow(clippy::too_many_arguments)]
                                 fn print_tree_node(
                                     node: &TreeNode,
                                     prefix: &str,
@@ -1578,7 +1579,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 None
             };
 
-            let between_a = between.as_ref().and_then(|v| v.get(0).cloned());
+            let between_a = between.as_ref().and_then(|v| v.first().cloned());
             let between_b = between.as_ref().and_then(|v| v.get(1).cloned());
 
             let params = serde_json::json!({
@@ -2009,19 +2010,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut vols_to_snap = Vec::new();
 
                 if *all || path_or_volume.is_none() {
-                    match query_status().await {
-                        Ok(resp) => {
-                            if let Some(res) = resp.result {
-                                if let Some(volumes_map) =
-                                    res.get("volumes").and_then(|v| v.as_object())
-                                {
-                                    for vol in volumes_map.keys() {
-                                        vols_to_snap.push(vol.clone());
-                                    }
+                    if let Ok(resp) = query_status().await {
+                        if let Some(res) = resp.result {
+                            if let Some(volumes_map) =
+                                res.get("volumes").and_then(|v| v.as_object())
+                            {
+                                for vol in volumes_map.keys() {
+                                    vols_to_snap.push(vol.clone());
                                 }
                             }
                         }
-                        Err(_) => {}
                     }
                     if vols_to_snap.is_empty() {
                         let vol = resolve_volume_from_path_or_cwd("");
@@ -2526,7 +2524,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         let child_count = node.children.len();
                                         let mut i = 0;
-                                        for (_, child) in &node.children {
+                                        for child in node.children.values() {
                                             i += 1;
                                             let is_last_child = i == child_count;
                                             let new_prefix = if is_root {
@@ -2603,7 +2601,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
 
-                                    for (_, root_node) in &roots {
+                                    for root_node in roots.values() {
                                         print_diff_tree_node(root_node, "", false, true);
                                     }
                                 }
@@ -2751,8 +2749,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 println!("No saved AI sessions found.");
                             } else {
                                 println!(
-                                    "{:<12} | {:<22} | {}",
-                                    "Session ID", "Created At", "First Question"
+                                    "{:<12} | {:<22} | First Question",
+                                    "Session ID", "Created At"
                                 );
                                 println!("{:-<12}-+-{:-<22}-+-{:-<30}", "", "", "");
                                 for (id, created, q) in sessions {
@@ -3004,7 +3002,7 @@ async fn check_and_print_background_work(json_mode: bool, filter_path_or_vol: Op
     if json_mode {
         return;
     }
-    let filter_vol = filter_path_or_vol.and_then(|p| resolve_volume_from_path(p));
+    let filter_vol = filter_path_or_vol.and_then(resolve_volume_from_path);
 
     if let Ok(resp) = query_status().await {
         if let Some(result) = resp.result {
@@ -3449,6 +3447,7 @@ fn print_error(json: bool, code: &str, message: &str, details: Option<serde_json
 ///       - N/no/anything else → print a plain message and `exit(1)`.
 ///
 /// If already elevated, this function is a no-op.
+#[allow(dead_code)]
 fn require_admin(command_name: &str, relaunch_args: &[&str], json: bool) {
     if platform_windows::is_elevated() {
         return;
@@ -3513,7 +3512,7 @@ fn parse_modified_time(s: &str) -> Result<chrono::DateTime<chrono::Utc>, String>
     let mut num_str = String::new();
     let mut unit_str = String::new();
     for c in s.chars() {
-        if c.is_digit(10) {
+        if c.is_ascii_digit() {
             num_str.push(c);
         } else {
             unit_str.push(c);
@@ -3562,9 +3561,7 @@ fn format_relative_time(at_rfc3339: &str) -> String {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(at_rfc3339) {
         let now = chrono::Utc::now();
         let diff = now.signed_duration_since(dt.with_timezone(&chrono::Utc));
-        if diff.num_seconds() < 0 {
-            "just now".to_string()
-        } else if diff.num_seconds() < 60 {
+        if diff.num_seconds() < 60 {
             "just now".to_string()
         } else if diff.num_minutes() < 60 {
             format!("{}m ago", diff.num_minutes())

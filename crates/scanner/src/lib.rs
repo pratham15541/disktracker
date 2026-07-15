@@ -97,17 +97,17 @@ pub fn scan_volume(volume: &str) -> io::Result<()> {
 
     let mut conn = match storage::get_db_connection() {
         Ok(c) => c,
-        Err(e) => return Err(io::Error::new(io::ErrorKind::Other, e.to_string())),
+        Err(e) => return Err(io::Error::other(e.to_string())),
     };
 
     conn.execute(
         "CREATE TEMP TABLE IF NOT EXISTS visited_files (file_id INTEGER PRIMARY KEY)",
         [],
     )
-    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+    .map_err(|e| io::Error::other(e.to_string()))?;
 
     conn.execute("DELETE FROM temp.visited_files", [])
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+        .map_err(|e| io::Error::other(e.to_string()))?;
 
     let mut dirs_scanned = 0u64;
     let mut files_scanned = 0u64;
@@ -190,6 +190,7 @@ pub fn scan_volume(volume: &str) -> io::Result<()> {
             .dirs_scanned
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+        #[allow(clippy::too_many_arguments)]
         fn walk(
             dir: &Path,
             parent_file_id: u64,

@@ -603,7 +603,7 @@ pub fn calculate_diff(
     let mut results = Vec::new();
     for (_, mut file) in diff_map {
         let full_path =
-            resolve_diff_file_path(&conn, volume, file.file_id, &file.name, file.parent_file_id);
+            resolve_diff_file_path(conn, volume, file.file_id, &file.name, file.parent_file_id);
 
         // Path filter check (case-insensitive)
         if let Some(ref filter) = path_filter {

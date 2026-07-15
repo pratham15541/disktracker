@@ -44,7 +44,7 @@ pub fn get_db_connection() -> std::result::Result<Connection, Box<dyn Error>> {
     // Enable WAL mode, optimize synchronous writes, set cache size and busy timeout
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    conn.pragma_update(None, "cache_size", &"-64000".to_string())?;
+    conn.pragma_update(None, "cache_size", "-64000".to_string())?;
     conn.pragma_update(None, "foreign_keys", "OFF")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
 
@@ -74,7 +74,7 @@ pub fn execute_readonly_query(
 
     while let Some(row) = rows.next()? {
         let mut row_map = serde_json::Map::new();
-        for i in 0..col_count {
+        for (i, col_name) in col_names.iter().enumerate().take(col_count) {
             let val = row.get_ref(i)?;
             let json_val = match val {
                 rusqlite::types::ValueRef::Null => serde_json::Value::Null,
@@ -97,7 +97,7 @@ pub fn execute_readonly_query(
                     serde_json::Value::String(s)
                 }
             };
-            row_map.insert(col_names[i].clone(), json_val);
+            row_map.insert(col_name.clone(), json_val);
         }
         results.push(serde_json::Value::Object(row_map));
     }
@@ -115,7 +115,7 @@ pub fn init_db() -> std::result::Result<PathBuf, Box<dyn Error>> {
     // Enable WAL mode, optimize synchronous writes, set cache size and busy timeout
     conn.pragma_update(None, "journal_mode", "WAL")?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
-    conn.pragma_update(None, "cache_size", &"-64000".to_string())?;
+    conn.pragma_update(None, "cache_size", "-64000".to_string())?;
     conn.pragma_update(None, "foreign_keys", "OFF")?;
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
 

@@ -118,8 +118,8 @@ pub async fn connect_client(path: &str) -> io::Result<PlatformClientStream> {
 #[cfg(not(windows))]
 fn map_pipe_to_socket(pipe_path: &str) -> String {
     // Maps Windows Named Pipe path format: e.g. "\\\\.\\pipe\\disktracker" -> "/tmp/disktracker.sock"
-    if pipe_path.starts_with(r"\\.\pipe\") {
-        format!("/tmp/{}.sock", &pipe_path[9..])
+    if let Some(name) = pipe_path.strip_prefix(r"\\.\pipe\") {
+        format!("/tmp/{}.sock", name)
     } else {
         "/tmp/disktracker.sock".to_string()
     }
@@ -775,12 +775,7 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
 pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<()> {
     let conn = match storage::get_db_connection() {
         Ok(c) => c,
-        Err(e) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        }
+        Err(e) => return Err(std::io::Error::other(e.to_string())),
     };
 
     let tracker = core_types::get_volume_tracker(volume);
@@ -1241,8 +1236,7 @@ pub fn kill_process_by_pid(pid: u32) -> std::io::Result<()> {
     if output.status.success() {
         Ok(())
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        Err(std::io::Error::other(
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ))
     }

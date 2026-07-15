@@ -34,8 +34,7 @@ fn parse_path(path: &str) -> Result<(String, String), String> {
         return Ok((drive, remaining));
     }
     // Extract mock Unix path, e.g. "/tmp/disktracker_mock_C/path"
-    if normalized.starts_with("/tmp/disktracker_mock_") {
-        let without_prefix = &normalized["/tmp/disktracker_mock_".len()..];
+    if let Some(without_prefix) = normalized.strip_prefix("/tmp/disktracker_mock_") {
         if let Some(slash_idx) = without_prefix.find('/') {
             let drive_letter = &without_prefix[..slash_idx];
             let drive = if drive_letter.ends_with(':') {
@@ -172,17 +171,16 @@ pub fn resolve_path_to_id(conn: &Connection, path: &str) -> Result<(String, u64)
         })
         .map_err(|e| e.to_string())?;
 
-    for candidate in candidates {
-        if let Ok((fid, parent_id)) = candidate {
-            if verify_parent_chain(conn, &volume, parent_id, &parts[0..parts.len() - 1]) {
-                return Ok((volume, fid));
-            }
+    for (fid, parent_id) in candidates.flatten() {
+        if verify_parent_chain(conn, &volume, parent_id, &parts[0..parts.len() - 1]) {
+            return Ok((volume, fid));
         }
     }
 
     Err(format!("Path not found: {}", path))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn get_history(
     conn: &Connection,
     path: &str,
@@ -263,11 +261,11 @@ pub fn get_history(
     let mut is_backward = false;
     let mut cursor_val = None;
     if let Some(c) = cursor {
-        if c.starts_with("f:") {
-            cursor_val = c[2..].parse::<i64>().ok();
-        } else if c.starts_with("b:") {
+        if let Some(rest) = c.strip_prefix("f:") {
+            cursor_val = rest.parse::<i64>().ok();
+        } else if let Some(rest) = c.strip_prefix("b:") {
             is_backward = true;
-            cursor_val = c[2..].parse::<i64>().ok();
+            cursor_val = rest.parse::<i64>().ok();
         } else {
             cursor_val = c.parse::<i64>().ok();
         }

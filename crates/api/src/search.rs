@@ -266,6 +266,7 @@ async fn rebuild_index_task(si: &'static SearchIndex, meta_path: PathBuf) -> Res
     // Collect all rows first so we can release the DB cursor before locking the writer.
     // Holding a SQLite cursor open while locking the writer (std::Mutex) for a long time
     // starves the Tokio thread pool and causes pipe connections to time out.
+    #[allow(clippy::type_complexity)]
     let all_rows: Vec<(String, u64, u64, String, bool, u64, String, String, u32)> = {
         let mut stmt = conn.prepare(
             "SELECT volume, file_id, parent_file_id, name, is_directory, size, created_at, modified_at, attributes FROM facts"
@@ -334,7 +335,7 @@ async fn rebuild_index_task(si: &'static SearchIndex, meta_path: PathBuf) -> Res
 
                     let mut doc = TantivyDocument::new();
                     doc.add_text(si.name, name);
-                    doc.add_text(si.name_ngram, &name.to_lowercase());
+                    doc.add_text(si.name_ngram, name.to_lowercase());
                     doc.add_text(si.path, &path_str);
                     doc.add_text(si.ext, &ext_str);
                     doc.add_text(si.volume, volume);
@@ -342,7 +343,7 @@ async fn rebuild_index_task(si: &'static SearchIndex, meta_path: PathBuf) -> Res
                     doc.add_i64(si.modified_at, modified_ts);
                     doc.add_u64(si.is_directory, if *is_dir { 1 } else { 0 });
                     doc.add_u64(si.file_id, *file_id);
-                    doc.add_text(si.uid, &format!("{}-{}", volume, file_id));
+                    doc.add_text(si.uid, format!("{}-{}", volume, file_id));
                     if (attrs & 1) != 0 {
                         doc.add_text(si.attributes, "readonly");
                     }
@@ -435,6 +436,7 @@ pub fn update_fact_in_index(conn: &Connection, volume: &str, file_id: u64) -> Re
     let uid_term = Term::from_field_text(si.uid, &format!("{}-{}", volume, file_id));
     writer_guard.delete_term(uid_term);
 
+    #[allow(clippy::type_complexity)]
     let res: Result<(String, u64, u64, String, i32, u64, String, String, u32), rusqlite::Error> = conn.query_row(
         "SELECT volume, file_id, parent_file_id, name, is_directory, size, created_at, modified_at, attributes FROM facts WHERE volume = ?1 AND file_id = ?2",
         rusqlite::params![volume, file_id],
@@ -478,7 +480,7 @@ pub fn update_fact_in_index(conn: &Connection, volume: &str, file_id: u64) -> Re
         doc.add_i64(si.modified_at, modified_dt.timestamp());
         doc.add_u64(si.is_directory, if is_dir { 1 } else { 0 });
         doc.add_u64(si.file_id, file_id);
-        doc.add_text(si.uid, &format!("{}-{}", volume, file_id));
+        doc.add_text(si.uid, format!("{}-{}", volume, file_id));
 
         if (attrs & 1) != 0 {
             doc.add_text(si.attributes, "readonly");
@@ -639,6 +641,7 @@ pub fn reconcile_search_results(
     alive
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn execute_search(
     query_str: &str,
     path_filter: Option<&str>,
@@ -711,7 +714,7 @@ pub fn execute_search(
 
             // Tier 3b — single word: exact term match also at 3.0
             if words.len() == 1 {
-                let term = Term::from_field_text(si.name, &words[0]);
+                let term = Term::from_field_text(si.name, words[0]);
                 let exact_q = Box::new(TermQuery::new(term, IndexRecordOption::Basic));
                 let boosted = Box::new(tantivy::query::BoostQuery::new(exact_q, 3.0));
                 tiers.push((Occur::Should, boosted));

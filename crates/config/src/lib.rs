@@ -145,13 +145,10 @@ pub fn load_config() -> AppConfig {
         .add_source(config::File::from(path))
         .build();
 
-    match builder {
-        Ok(c) => match c.try_deserialize::<AppConfig>() {
-            Ok(cfg) => cfg,
-            Err(_) => AppConfig::default(),
-        },
-        Err(_) => AppConfig::default(),
-    }
+    builder
+        .ok()
+        .and_then(|c| c.try_deserialize::<AppConfig>().ok())
+        .unwrap_or_default()
 }
 
 pub fn save_config(config: &AppConfig) -> Result<(), String> {
@@ -171,7 +168,7 @@ pub fn parse_any_duration(s: &str) -> Result<chrono::Duration, String> {
     let mut unit_str = String::new();
 
     for c in s.chars() {
-        if c.is_digit(10) {
+        if c.is_ascii_digit() {
             if !unit_str.is_empty() {
                 return Err(format!(
                     "Invalid duration format: digit found after unit in '{}'",

@@ -355,6 +355,8 @@ impl ChatModel for OpenRouterAdapter {
                                 ToolCall::new(acc.id.clone(), acc.name.clone(), args)
                             })
                             .collect();
+                        // Clear so the stream-end None branch doesn't re-emit the same calls.
+                        state.accumulated_tools.clear();
                         Some(parsed)
                     } else {
                         None

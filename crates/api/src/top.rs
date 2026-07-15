@@ -68,7 +68,7 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     }
 
     let bytes = s.as_bytes();
-    if bytes.len() % 4 != 0 {
+    if !bytes.len().is_multiple_of(4) {
         return None;
     }
 
@@ -811,11 +811,11 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
             let mut is_dup = false;
             if let Some(parent_map) = volume_parent_maps.get(&item.volume) {
                 for &(ref acc_vol, acc_fid) in &accepted_folders {
-                    if acc_vol == &item.volume {
-                        if is_descendant_u64(parent_map, item.file_id, acc_fid) {
-                            is_dup = true;
-                            break;
-                        }
+                    if acc_vol == &item.volume
+                        && is_descendant_u64(parent_map, item.file_id, acc_fid)
+                    {
+                        is_dup = true;
+                        break;
                     }
                 }
             }
@@ -1057,7 +1057,7 @@ mod tests {
                 });
             }
         }
-        file_items.sort_by(|a, b| b.size.cmp(&a.size));
+        file_items.sort_by_key(|a| std::cmp::Reverse(a.size));
 
         assert_eq!(file_items.len(), 3);
         assert_eq!(file_items[0].name, "file2.txt");
@@ -1117,7 +1117,7 @@ mod tests {
                 });
             }
         }
-        folder_items.sort_by(|a, b| b.size.cmp(&a.size));
+        folder_items.sort_by_key(|a| std::cmp::Reverse(a.size));
 
         // Ranked folders:
         // C: root (parent of all, total size 350)

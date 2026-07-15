@@ -21,13 +21,10 @@ impl State for AskState {
         if !other.question.is_empty() {
             self.question = other.question;
         }
-        if !other.messages.is_empty() {
-            if other.messages.len() > self.messages.len() {
-                self.messages = other.messages;
-            } else if other.messages.len() == self.messages.len() && other.messages != self.messages
-            {
-                self.messages = other.messages;
-            }
+        if !other.messages.is_empty()
+            && (other.messages.len() > self.messages.len() || other.messages != self.messages)
+        {
+            self.messages = other.messages;
         }
         self.round_count = other.round_count;
         self.interactive = other.interactive;
@@ -65,7 +62,7 @@ fn parse_time_param(s: &str) -> std::result::Result<i64, String> {
     let mut num_str = String::new();
     let mut unit_str = String::new();
     for c in s_clean.chars() {
-        if c.is_digit(10) {
+        if c.is_ascii_digit() {
             num_str.push(c);
         } else {
             unit_str.push(c);
@@ -731,7 +728,7 @@ pub fn build_agent_graph(
                         let cursor = tc.arguments.get("cursor").and_then(|c| c.as_str());
 
                         let since_ts = since.and_then(|s| parse_time_param(s).ok());
-                        let resolved_path = path.map(|p| resolve_absolute_path(p));
+                        let resolved_path = path.map(resolve_absolute_path);
 
                         let mut resolved_vol = volume.map(|v| {
                             if v.len() == 1 {
@@ -804,7 +801,7 @@ pub fn build_agent_graph(
                         let path = tc.arguments.get("path").and_then(|p| p.as_str());
                         let limit = tc.arguments.get("limit").and_then(|l| l.as_u64());
 
-                        let resolved_path = path.map(|p| resolve_absolute_path(p));
+                        let resolved_path = path.map(resolve_absolute_path);
 
                         let diff_params = serde_json::json!({
                             "snapshot_a": snapshot_a,
