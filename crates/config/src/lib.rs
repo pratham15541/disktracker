@@ -8,8 +8,6 @@ use std::path::PathBuf;
 pub struct AppConfig {
     #[serde(alias = "retention-days", deserialize_with = "deserialize_retention")]
     pub retention: String,
-    #[serde(default = "default_fuzzy")]
-    pub fuzzy: bool,
     #[serde(default = "default_auto_snapshot", alias = "auto-snapshot")]
     pub auto_snapshot: bool,
     #[serde(
@@ -33,10 +31,6 @@ pub struct AppConfig {
     pub ai_websearch_provider: Option<String>,
     #[serde(alias = "websearch-cx")]
     pub ai_websearch_cx: Option<String>,
-}
-
-fn default_fuzzy() -> bool {
-    true
 }
 
 fn default_auto_snapshot() -> bool {
@@ -111,7 +105,6 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             retention: "30d".to_string(),
-            fuzzy: true,
             auto_snapshot: false,
             auto_snapshot_interval: "24h".to_string(),
             ai_base_url: None,

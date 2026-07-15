@@ -192,6 +192,7 @@ pub async fn run_server(
         let tracker = core_types::get_volume_tracker(&vol);
         *tracker.state.lock().unwrap() = DaemonState::BaselineScanning;
 
+        let _ = platform_windows::ensure_usn_journal_active(&vol);
         let usn_start = platform_windows::get_usn_cursor(&vol).unwrap_or(0);
 
         // Spawn Watcher task
@@ -771,19 +772,17 @@ async fn handle_request(
             let key = req.params.get("key").and_then(|k| k.as_str()).unwrap_or("");
             if key != "retention"
                 && key != "retention-days"
-                && key != "fuzzy"
                 && key != "auto-snapshot"
                 && key != "auto-snapshot-interval"
             {
                 return JsonRpcResponse::error(
                     req.id,
                     -32602,
-                    "Invalid config key. Valid keys are: retention, retention-days, fuzzy, auto-snapshot, auto-snapshot-interval".to_string(),
+                    "Invalid config key. Valid keys are: retention, retention-days, auto-snapshot, auto-snapshot-interval".to_string(),
                 );
             }
             let config = config_mgr::load_config();
             let value = match key {
-                "fuzzy" => config.fuzzy.to_string(),
                 "auto-snapshot" => config.auto_snapshot.to_string(),
                 "auto-snapshot-interval" => config.auto_snapshot_interval.clone(),
                 _ => config.retention.clone(),
@@ -803,46 +802,14 @@ async fn handle_request(
                 .unwrap_or("");
             if key != "retention"
                 && key != "retention-days"
-                && key != "fuzzy"
                 && key != "auto-snapshot"
                 && key != "auto-snapshot-interval"
             {
                 return JsonRpcResponse::error(
                     req.id,
                     -32602,
-                    "Invalid config key. Valid keys are: retention, retention-days, fuzzy, auto-snapshot, auto-snapshot-interval".to_string(),
+                    "Invalid config key. Valid keys are: retention, retention-days, auto-snapshot, auto-snapshot-interval".to_string(),
                 );
-            }
-
-            if key == "fuzzy" {
-                let parsed_bool = match val_str.trim().to_lowercase().as_str() {
-                    "true" | "on" | "1" | "yes" => true,
-                    "false" | "off" | "0" | "no" => false,
-                    _ => {
-                        return JsonRpcResponse::error(
-                            req.id,
-                            -32602,
-                            "Invalid boolean value. Acceptable values: true, false, on, off"
-                                .to_string(),
-                        );
-                    }
-                };
-
-                let mut config = config_mgr::load_config();
-                config.fuzzy = parsed_bool;
-                if let Err(e) = config_mgr::save_config(&config) {
-                    return JsonRpcResponse::error(
-                        req.id,
-                        -32603,
-                        format!("Failed to save config: {}", e),
-                    );
-                }
-                let res = serde_json::json!({
-                    "key": key,
-                    "value": parsed_bool.to_string(),
-                    "message": "Fuzzy search setting updated."
-                });
-                return JsonRpcResponse::success(req.id, res);
             }
 
             if key == "auto-snapshot" {
@@ -1061,6 +1028,17 @@ async fn handle_request(
                 .and_then(|l| l.as_u64())
                 .unwrap_or(100) as usize;
 
+            let advanced_filter = req
+                .params
+                .get("advanced")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+                || req
+                    .params
+                    .get("fuzzy")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
             match search::execute_search(
                 query_str,
                 path_filter,
@@ -1073,6 +1051,7 @@ async fn handle_request(
                 hidden_filter,
                 system_filter,
                 limit,
+                advanced_filter,
             ) {
                 Ok(raw_docs) => {
                     // Reconcile: remove any docs no longer present in the facts table.

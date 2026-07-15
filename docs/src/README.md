@@ -114,6 +114,7 @@ Below is the quick reference card for DiskTracker commands.
 | `disktracker snapshot diff <A> <B>` | Diffs two snapshots to show net files created, updated, or removed between time frames. |
 | `disktracker ai config` | Configures your AI assistant API keys (OpenAI / OpenRouter base URL, API token). |
 | `disktracker ask "<question>"` | Activates the LangGraph conversational agent to answer questions or prune folders. |
+| `disktracker update` | Checks GitHub for the latest release, downloads the zip archive, and performs a zero-downtime binary swap. |
 | `disktracker uninstall` | Stops the daemon service and deletes database logs. |
 
 For detailed parameters and flags for each subcommand, read the [CLI Command Reference Card](docs/CLI_COMMANDS.md).

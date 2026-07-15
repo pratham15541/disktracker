@@ -1071,6 +1071,7 @@ dependencies = [
  "platform-traits",
  "platform-windows",
  "rand 0.8.7",
+ "reqwest",
  "serde",
  "serde_json",
  "storage",

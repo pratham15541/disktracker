@@ -48,9 +48,11 @@ Direct Win32 service wrapper operations.
 ## 3. Database Search and Statistics
 
 ### `disktracker search [query]`
-Performs ultra-fast substring searches on indexed filenames.
-* **Usage**: `disktracker search "*.log" [options]`
+Performs ultra-fast substring searches on indexed filenames. By default, it runs an exact case-insensitive substring search.
+* **Usage**: `disktracker search "log" [options]`
 * **Options**:
+  * `--advanced` (alias `--advance`): Enable multi-tier scoring (phrase, prefix, ngram, fuzzy matching).
+  * `--fuzzy`: Enable fuzzy matching scoring tier.
   * `--path <path>`: Filter files by folder path prefix (e.g. `C:\Users`).
   * `--ext <extension>`: Filter by exact file extension (e.g. `pdf`).
   * `--volume <volume>`: Filter by volume designation (e.g. `C:`).
@@ -122,3 +124,12 @@ Invokes the LangGraph agent to inspect the disk state using natural language.
 * **Options**:
   * `-i`, `--interactive`: Enable interactive Action mode. Allows the AI agent to propose file system mutations (like deleting caches or temporary log files) under human-in-the-loop (HITL) approval gates.
   * `--session <id>`: Resume a previous conversation session.
+
+---
+
+## 6. Self-Update Utility
+
+### `disktracker update`
+Checks the GitHub repository for the latest release, downloads the appropriate target archive, stops any running background daemons/services, performs a zero-downtime binary swap, restarts the daemon, and cleans up old temporary binaries.
+* **Usage**: `disktracker update`
+* **Admin privileges required**: Yes (on Windows if installed in program files or registered as a Windows Service).

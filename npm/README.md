@@ -39,8 +39,8 @@ disktracker status
 # Ask AI questions about disk usage
 disktracker ask "Find all log files in C:\Temp larger than 50MB and summarize them"
 
-# Perform fuzzy search for files
-disktracker search "*.log" --min-size 10485760
+# Search for files (substring search by default; use --advanced for fuzzy search)
+disktracker search "log" --min-size 10485760
 
 # View file mutation history (Created, Deleted, Modified)
 disktracker history C:\Projects

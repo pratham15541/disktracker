@@ -693,6 +693,9 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                         if size_delta == 0 && churn_val == 0 {
                             continue;
                         }
+                        if !churn && size_delta.abs() < 10 {
+                            continue;
+                        }
 
                         let name = name_map.get(&fid).cloned().unwrap_or_default();
 
@@ -725,6 +728,9 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                         let churn_val = *direct_churn.get(&fid).unwrap_or(&0);
 
                         if size_delta == 0 && churn_val == 0 {
+                            continue;
+                        }
+                        if !churn && size_delta.abs() < 10 {
                             continue;
                         }
 

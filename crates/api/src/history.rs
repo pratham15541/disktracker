@@ -379,6 +379,9 @@ pub fn get_history(
         entries = collapsed;
     }
 
+    // Changes less than 10B should not be shown (except renames)
+    entries.retain(|e| e.kind == "Renamed" || e.size_delta.abs() >= 10);
+
     let collapsed_has_more = entries.len() > limit || has_more;
     if entries.len() > limit {
         entries.truncate(limit);

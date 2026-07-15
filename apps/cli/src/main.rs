@@ -95,6 +95,12 @@ enum Commands {
         /// Show verbose output
         #[arg(long)]
         verbose: bool,
+        /// Enable advanced scoring and multi-tier search
+        #[arg(long, alias = "advance")]
+        advanced: bool,
+        /// Enable fuzzy matching
+        #[arg(long)]
+        fuzzy: bool,
     },
     /// View the mutation history of a specific file or directory
     History {
@@ -199,6 +205,8 @@ enum Commands {
         #[arg(long)]
         session: Option<String>,
     },
+    /// Update DiskTracker to the latest version from GitHub
+    Update,
 }
 
 #[derive(Subcommand)]
@@ -215,14 +223,14 @@ enum ServiceCommands {
 
 #[derive(Subcommand)]
 enum ConfigCommands {
-    /// Get the value of a configuration key. Examples: 'config get fuzzy', 'config get retention'
+    /// Get the value of a configuration key. Examples: 'config get retention'
     Get {
-        /// The config key to query (retention, retention-days, fuzzy)
+        /// The config key to query (retention, retention-days, auto-snapshot, auto-snapshot-interval)
         key: String,
     },
-    /// Set the value of a configuration key. Examples: 'config set fuzzy false', 'config set retention 24h', 'config set retention-days 7'
+    /// Set the value of a configuration key. Examples: 'config set retention 24h', 'config set retention-days 7'
     Set {
-        /// The config key to modify (retention, retention-days, fuzzy)
+        /// The config key to modify (retention, retention-days, auto-snapshot, auto-snapshot-interval)
         key: String,
         /// The new value to assign
         value: String,
@@ -757,6 +765,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             cursor,
             json,
             verbose: _,
+            advanced,
+            fuzzy,
         } => {
             check_and_print_background_work(*json, volume.as_deref().or(path.as_deref())).await;
             let mod_after_ts = if let Some(ref s) = modified_after {
@@ -815,6 +825,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "system": system,
                 "limit": limit,
                 "cursor": cursor,
+                "advanced": advanced,
+                "fuzzy": fuzzy,
             });
 
             let mut first_attempt = true;
@@ -2954,6 +2966,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        Commands::Update => {
+            if let Err(e) = run_update().await {
+                eprintln!("[Cli] Update failed: {}", e);
+                std::process::exit(1);
+            }
+        }
     }
 
     Ok(())
@@ -3681,4 +3699,308 @@ impl Drop for Spinner {
             let _ = tx.send(());
         }
     }
+}
+
+async fn run_update() -> Result<(), String> {
+    println!("[Cli] Fetching latest release info from GitHub...");
+    let client = reqwest::Client::builder()
+        .user_agent("disktracker-updater")
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let url = "https://api.github.com/repos/pratham15541/disktracker/releases/latest";
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("Network request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "GitHub API returned error status: {}",
+            resp.status()
+        ));
+    }
+
+    let json = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+
+    let latest_version = json
+        .get("tag_name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "No tag_name found in release info".to_string())?;
+
+    let current_version = env!("CARGO_PKG_VERSION");
+
+    // Normalise versions: strip leading 'v'
+    let latest_clean = latest_version.trim_start_matches('v');
+    let current_clean = current_version.trim_start_matches('v');
+
+    let mut is_newer = false;
+    let latest_parts: Vec<&str> = latest_clean.split('.').collect();
+    let current_parts: Vec<&str> = current_clean.split('.').collect();
+
+    for i in 0..std::cmp::max(latest_parts.len(), current_parts.len()) {
+        let latest_val = latest_parts
+            .get(i)
+            .and_then(|&s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        let current_val = current_parts
+            .get(i)
+            .and_then(|&s| s.parse::<u32>().ok())
+            .unwrap_or(0);
+        if latest_val > current_val {
+            is_newer = true;
+            break;
+        } else if latest_val < current_val {
+            is_newer = false;
+            break;
+        }
+    }
+
+    if !is_newer {
+        println!(
+            "DiskTracker is already up to date (current: {}, latest: {}).",
+            current_version, latest_version
+        );
+        return Ok(());
+    }
+
+    println!(
+        "[Cli] New version available: {}. (Current version: {})",
+        latest_version, current_version
+    );
+
+    // 2. Find correct asset
+    let assets = json
+        .get("assets")
+        .and_then(|a| a.as_array())
+        .ok_or_else(|| "No assets found in release information".to_string())?;
+
+    let mut download_url = None;
+    let mut asset_name = String::new();
+
+    // Look for Windows asset if on windows
+    #[cfg(windows)]
+    let os_suffix = "windows-x64.zip";
+    #[cfg(not(windows))]
+    let os_suffix = ".zip"; // Fallback for Unix
+
+    for asset in assets {
+        if let Some(name) = asset.get("name").and_then(|n| n.as_str()) {
+            if name.ends_with(os_suffix) {
+                if let Some(url) = asset.get("browser_download_url").and_then(|u| u.as_str()) {
+                    download_url = Some(url.to_string());
+                    asset_name = name.to_string();
+                    break;
+                }
+            }
+        }
+    }
+
+    // Fallback: if no matching asset found, take any zip
+    if download_url.is_none() {
+        for asset in assets {
+            if let Some(name) = asset.get("name").and_then(|n| n.as_str()) {
+                if name.ends_with(".zip") {
+                    if let Some(url) = asset.get("browser_download_url").and_then(|u| u.as_str()) {
+                        download_url = Some(url.to_string());
+                        asset_name = name.to_string();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    let url = download_url.ok_or_else(|| {
+        "Could not find a suitable release asset (.zip) for the current platform.".to_string()
+    })?;
+
+    // 3. Download the asset
+    let db_dir = storage::get_db_dir().map_err(|e| e.to_string())?;
+    let zip_path = db_dir.join("disktracker_update.zip");
+
+    println!("[Cli] Downloading release asset: {}...", asset_name);
+    let mut resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Download request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Failed to download update: HTTP {}", resp.status()));
+    }
+
+    let mut file = std::fs::File::create(&zip_path)
+        .map_err(|e| format!("Failed to create local update zip: {}", e))?;
+
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| format!("Failed to receive chunk: {}", e))?
+    {
+        use std::io::Write;
+        file.write_all(&chunk)
+            .map_err(|e| format!("Failed to write chunk to local file: {}", e))?;
+    }
+    drop(file);
+    println!("  [OK] Download complete.");
+
+    // 4. Extract Zip
+    let extract_dir = db_dir.join("disktracker_update_extracted");
+    let _ = std::fs::remove_dir_all(&extract_dir);
+    std::fs::create_dir_all(&extract_dir)
+        .map_err(|e| format!("Failed to create extraction directory: {}", e))?;
+
+    println!("[Cli] Extracting archive...");
+    let status = if cfg!(target_os = "windows") {
+        std::process::Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                &format!(
+                    "Expand-Archive -Force -Path '{}' -DestinationPath '{}'",
+                    zip_path.display(),
+                    extract_dir.display()
+                ),
+            ])
+            .status()
+    } else {
+        std::process::Command::new("unzip")
+            .args([
+                "-o",
+                &zip_path.to_string_lossy(),
+                "-d",
+                &extract_dir.to_string_lossy(),
+            ])
+            .status()
+    };
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("  [OK] Extraction complete.");
+        }
+        _ => {
+            return Err("Failed to extract update package. Make sure unzip (Unix) or Powershell (Windows) is available.".to_string());
+        }
+    }
+
+    // 5. Find the new binary
+    let mut exe_filename = "disktracker";
+    if cfg!(target_os = "windows") {
+        exe_filename = "disktracker.exe";
+    }
+
+    fn find_file_recursive(dir: &std::path::Path, target: &str) -> Option<std::path::PathBuf> {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.file_name().and_then(|n| n.to_str()) == Some(target) {
+                    return Some(path);
+                } else if path.is_dir() {
+                    if let Some(found) = find_file_recursive(&path, target) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    let new_exe_path = find_file_recursive(&extract_dir, exe_filename)
+        .ok_or_else(|| format!("Could not locate {} in the extracted files.", exe_filename))?;
+
+    // 6. Stop the running daemon
+    #[cfg(windows)]
+    {
+        println!("[Cli] Stopping Windows Service 'DiskTracker' if running...");
+        let _ = platform_windows::stop_service();
+    }
+
+    if let Ok(resp) = query_status().await {
+        if let Some(result) = resp.result {
+            if let Ok(snap) = serde_json::from_value::<ProgressSnapshot>(result) {
+                println!(
+                    "[Cli] Stopping running background daemon process (PID {})...",
+                    snap.daemon_pid
+                );
+                let _ = platform_windows::kill_process_by_pid(snap.daemon_pid);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+
+    // 7. Swap binary
+    let current_exe = std::env::current_exe()
+        .map_err(|e| format!("Failed to retrieve current executable path: {}", e))?;
+    let old_exe = current_exe.with_extension("exe.old");
+
+    let _ = std::fs::remove_file(&old_exe);
+
+    println!("[Cli] Swapping binaries...");
+    std::fs::rename(&current_exe, &old_exe)
+        .map_err(|e| format!("Failed to rename running executable: {}", e))?;
+
+    if let Err(e) = std::fs::copy(&new_exe_path, &current_exe) {
+        let _ = std::fs::rename(&old_exe, &current_exe);
+        return Err(format!("Failed to copy new binary to original path: {}", e));
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = std::fs::metadata(&current_exe) {
+            let mut permissions = metadata.permissions();
+            permissions.set_mode(0o755);
+            let _ = std::fs::set_permissions(&current_exe, permissions);
+        }
+    }
+
+    println!("  [OK] Swap successful.");
+
+    // 8. Restart daemon
+    println!("[Cli] Starting daemon...");
+    #[allow(unused_mut)]
+    let mut started_service = false;
+    #[cfg(windows)]
+    {
+        if platform_windows::start_service().is_ok() {
+            println!("  [OK] Windows Service started successfully.");
+            started_service = true;
+        }
+    }
+
+    if !started_service {
+        let mut cmd = std::process::Command::new(&current_exe);
+        cmd.arg("daemon");
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+        match cmd.spawn() {
+            Ok(_) => println!("  [OK] Daemon background process spawned successfully."),
+            Err(e) => eprintln!(
+                "  [WARNING] Failed to spawn background daemon process: {}",
+                e
+            ),
+        }
+    }
+
+    // 9. Clean up zip and old exe
+    let _ = std::fs::remove_file(zip_path);
+    let _ = std::fs::remove_dir_all(extract_dir);
+
+    let old_exe_str = old_exe.to_string_lossy().into_owned();
+    tokio::task::spawn_blocking(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let _ = std::fs::remove_file(old_exe_str);
+    });
+
+    println!(
+        "[Cli] DiskTracker successfully updated to version {}!",
+        latest_version
+    );
+    Ok(())
 }

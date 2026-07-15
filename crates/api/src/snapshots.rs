@@ -602,6 +602,10 @@ pub fn calculate_diff(
     // Resolve paths & filter by prefix
     let mut results = Vec::new();
     for (_, mut file) in diff_map {
+        // Changes less than 10B should not be shown (except renames)
+        if file.kind != "Renamed" && file.size_delta.abs() < 10 {
+            continue;
+        }
         let full_path =
             resolve_diff_file_path(conn, volume, file.file_id, &file.name, file.parent_file_id);
 

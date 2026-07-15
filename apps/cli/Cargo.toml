@@ -18,6 +18,7 @@ chrono = "0.4"
 agent = { path = "../../crates/agent" }
 rand = "0.8"
 termimad = "0.31"
+reqwest = { version = "0.12", features = ["json"] }
 
 
 

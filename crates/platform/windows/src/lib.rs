@@ -363,7 +363,134 @@ pub fn get_file_size_by_id(_volume: &str, _file_id: u64) -> Option<u64> {
 }
 
 #[cfg(windows)]
+pub fn ensure_usn_journal_active(volume: &str) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use win32::{
+        CloseHandle, CreateFileW, DeviceIoControl, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FSCTL_QUERY_USN_JOURNAL, GENERIC_READ, OPEN_EXISTING,
+    };
+
+    const FSCTL_CREATE_USN_JOURNAL: u32 = 0x00090057;
+
+    #[repr(C)]
+    struct CreateUsnJournalData {
+        maximum_size: u64,
+        allocation_delta: u64,
+    }
+
+    let vol_path = format!("\\\\.\\{}", volume);
+    let vol_path_w: Vec<u16> = std::ffi::OsStr::new(&vol_path)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    unsafe {
+        let handle = CreateFileW(
+            vol_path_w.as_ptr(),
+            GENERIC_READ | 0x40000000, // GENERIC_WRITE
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            0,
+            0,
+        );
+
+        if handle == -1 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        #[repr(C)]
+        struct UsnJournalData {
+            usn_journal_id: u64,
+            first_usn: i64,
+            next_usn: i64,
+            lowest_valid_usn: i64,
+            max_usn: i64,
+            maximum_size: u64,
+            allocation_delta: u64,
+        }
+
+        let mut journal_data = std::mem::zeroed::<UsnJournalData>();
+        let mut bytes_returned = 0u32;
+        let query_success = DeviceIoControl(
+            handle,
+            FSCTL_QUERY_USN_JOURNAL,
+            std::ptr::null(),
+            0,
+            &mut journal_data as *mut _ as *mut _,
+            std::mem::size_of::<UsnJournalData>() as u32,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+        );
+
+        if query_success != 0 {
+            CloseHandle(handle);
+            return Ok(()); // Already active
+        }
+
+        let create_data = CreateUsnJournalData {
+            maximum_size: 33554432,    // 32MB
+            allocation_delta: 4194304, // 4MB
+        };
+
+        let create_success = DeviceIoControl(
+            handle,
+            FSCTL_CREATE_USN_JOURNAL,
+            &create_data as *const _ as *const _,
+            std::mem::size_of::<CreateUsnJournalData>() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut bytes_returned,
+            std::ptr::null_mut(),
+        );
+
+        CloseHandle(handle);
+
+        if create_success != 0 {
+            println!(
+                "[USN] Successfully activated/started USN journal for {}",
+                volume
+            );
+            return Ok(());
+        }
+    }
+
+    // Fallback to fsutil command
+    let output = std::process::Command::new("fsutil")
+        .args(["usn", "createjournal", "m=33554432", "a=4194304", volume])
+        .output();
+
+    match output {
+        Ok(out) => {
+            if out.status.success() {
+                println!(
+                    "[USN] fsutil successfully activated USN journal for {}",
+                    volume
+                );
+                Ok(())
+            } else {
+                let err_msg = String::from_utf8_lossy(&out.stderr).to_string();
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("fsutil failed to create USN journal: {}", err_msg),
+                ))
+            }
+        }
+        Err(e) => Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("Failed to execute fsutil fallback: {}", e),
+        )),
+    }
+}
+
+#[cfg(not(windows))]
+pub fn ensure_usn_journal_active(_volume: &str) -> std::io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
 pub fn get_usn_cursor(volume: &str) -> std::io::Result<u64> {
+    let _ = ensure_usn_journal_active(volume);
     use std::os::windows::ffi::OsStrExt;
     use win32::{
         CloseHandle, CreateFileW, DeviceIoControl, FILE_SHARE_READ, FILE_SHARE_WRITE,
@@ -433,6 +560,7 @@ pub fn get_usn_cursor(_volume: &str) -> std::io::Result<u64> {
 
 #[cfg(windows)]
 pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<()> {
+    let _ = ensure_usn_journal_active(volume);
     use std::os::windows::ffi::OsStrExt;
     use win32::{
         CloseHandle, CreateFileW, DeviceIoControl, FILE_SHARE_READ, FILE_SHARE_WRITE,

@@ -27,6 +27,7 @@ pub struct SearchIndex {
     pub reader: IndexReader,
     pub writer: Arc<Mutex<IndexWriter>>,
     pub name: Field,
+    pub name_lower: Field, // untokenized lowercase filename for exact substring search
     pub name_ngram: Field, // trigram index for substring search
     pub path: Field,
     pub ext: Field,
@@ -53,6 +54,7 @@ pub fn init_search_index() -> Result<&'static SearchIndex, String> {
     // Build schema — name_ngram uses a custom "ngram3" tokenizer for substring search.
     let mut schema_builder = Schema::builder();
     let name = schema_builder.add_text_field("name", TEXT | STORED);
+    let name_lower = schema_builder.add_text_field("name_lower", STRING | STORED);
     let name_ngram = schema_builder.add_text_field(
         "name_ngram",
         TextOptions::default().set_indexing_options(
@@ -108,6 +110,7 @@ pub fn init_search_index() -> Result<&'static SearchIndex, String> {
         reader,
         writer: Arc::new(Mutex::new(writer)),
         name,
+        name_lower,
         name_ngram,
         path,
         ext,
@@ -335,6 +338,7 @@ async fn rebuild_index_task(si: &'static SearchIndex, meta_path: PathBuf) -> Res
 
                     let mut doc = TantivyDocument::new();
                     doc.add_text(si.name, name);
+                    doc.add_text(si.name_lower, name.to_lowercase());
                     doc.add_text(si.name_ngram, name.to_lowercase());
                     doc.add_text(si.path, &path_str);
                     doc.add_text(si.ext, &ext_str);
@@ -467,6 +471,7 @@ pub fn update_fact_in_index(conn: &Connection, volume: &str, file_id: u64) -> Re
 
         let mut doc = TantivyDocument::new();
         doc.add_text(si.name, &name);
+        doc.add_text(si.name_lower, name.to_lowercase());
         doc.add_text(si.name_ngram, &name);
         doc.add_text(si.path, &path_str);
 
@@ -654,193 +659,189 @@ pub fn execute_search(
     hidden_filter: Option<bool>,
     system_filter: Option<bool>,
     limit: usize,
+    advanced: bool,
 ) -> Result<Vec<(TantivyDocument, f32)>, String> {
     let si = init_search_index()?;
     let searcher = si.reader.searcher();
 
     let mut sub_queries: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
-    // --- Fuzzy Text Search with 5-tier ranking ---
-    // Tier 1: Exact full name match       → boost 10.0  ("notes.txt" → "notes.txt")
-    // Tier 2: Exact phrase (all words)    → boost  6.0  ("magic file" → "magic_files.txt")
-    // Tier 3: All words present (AND)     → boost  3.0  (both "magic" and "file" in name)
-    // Tier 4: Prefix per word             → boost  1.5  ("mag" → "magic*")
-    // Tier 5: Fuzzy per word (edit dist.) → boost  0.8  ("magik" → fuzzy "magic")
-    //
-    // The final Must clause requires AT LEAST one tier to match, so any matching
-    // document reaches the results list. The score from the highest-matching tier
-    // determines its rank position.
+    // Escape regex special chars helper for regex queries.
+    fn escape_re(s: &str) -> String {
+        let mut out = String::with_capacity(s.len() * 2);
+        for c in s.chars() {
+            if r"\.+*?()|[]{}^$".contains(c) {
+                out.push('\\');
+            }
+            out.push(c);
+        }
+        out
+    }
+
+    // --- Fuzzy/Advanced or Exact Substring Text Search ---
     if !query_str.trim().is_empty() && query_str != "*" {
         let q_lower = query_str.trim().to_lowercase();
-        let words: Vec<&str> = q_lower.split_whitespace().collect();
-        let query_parser = tantivy::query::QueryParser::for_index(&si.index, vec![si.name]);
 
-        // Collect all tier queries into one big Should pool.
-        // The Must wrapper below guarantees at least one tier matches.
-        let mut tiers: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+        if advanced {
+            // --- Fuzzy Text Search with 5-tier ranking ---
+            // Tier 1: Exact full name match       → boost 10.0  ("notes.txt" → "notes.txt")
+            // Tier 2: Exact phrase (all words)    → boost  6.0  ("magic file" → "magic_files.txt")
+            // Tier 3: All words present (AND)     → boost  3.0  (both "magic" and "file" in name)
+            // Tier 4: Prefix per word             → boost  1.5  ("mag" → "magic*")
+            // Tier 5: Fuzzy per word (edit dist.) → boost  0.8  ("magik" → fuzzy "magic")
+            //
+            // The final Must clause requires AT LEAST one tier to match, so any matching
+            // document reaches the results list. The score from the highest-matching tier
+            // determines its rank position.
+            let words: Vec<&str> = q_lower.split_whitespace().collect();
+            let query_parser = tantivy::query::QueryParser::for_index(&si.index, vec![si.name]);
 
-        if words.is_empty() {
-            sub_queries.push((Occur::Must, Box::new(AllQuery)));
-        } else {
-            // Tier 1 — exact full name string (works on the tokenised field via QueryParser)
-            if let Ok(exact_full) = query_parser.parse_query(&format!("\"{}\"", q_lower)) {
-                let boosted = Box::new(tantivy::query::BoostQuery::new(exact_full, 10.0));
-                tiers.push((Occur::Should, boosted));
-            }
+            // Collect all tier queries into one big Should pool.
+            // The Must wrapper below guarantees at least one tier matches.
+            let mut tiers: Vec<(Occur, Box<dyn Query>)> = Vec::new();
 
-            // Tier 2 — exact phrase (multi-word PhraseQuery via QueryParser "quoted")
-            if words.len() > 1 {
-                if let Ok(phrase_q) = query_parser.parse_query(&format!("\"{}\"", q_lower)) {
-                    let boosted = Box::new(tantivy::query::BoostQuery::new(phrase_q, 6.0));
+            if words.is_empty() {
+                sub_queries.push((Occur::Must, Box::new(AllQuery)));
+            } else {
+                // Tier 1 — exact full name string (works on the tokenised field via QueryParser)
+                if let Ok(exact_full) = query_parser.parse_query(&format!("\"{}\"", q_lower)) {
+                    let boosted = Box::new(tantivy::query::BoostQuery::new(exact_full, 10.0));
                     tiers.push((Occur::Should, boosted));
                 }
-            }
 
-            // Tier 3 — all words must appear (AND of exact TermQuery per word)
-            if words.len() > 1 {
-                let and_clauses: Vec<(Occur, Box<dyn Query>)> = words
-                    .iter()
-                    .map(|w| {
-                        let term = Term::from_field_text(si.name, w);
-                        let q: Box<dyn Query> =
-                            Box::new(TermQuery::new(term, IndexRecordOption::Basic));
-                        (Occur::Must, q)
-                    })
-                    .collect();
-                let and_query = Box::new(BooleanQuery::new(and_clauses));
-                let boosted = Box::new(tantivy::query::BoostQuery::new(and_query, 3.0));
-                tiers.push((Occur::Should, boosted));
-            }
-
-            // Tier 3b — single word: exact term match also at 3.0
-            if words.len() == 1 {
-                let term = Term::from_field_text(si.name, words[0]);
-                let exact_q = Box::new(TermQuery::new(term, IndexRecordOption::Basic));
-                let boosted = Box::new(tantivy::query::BoostQuery::new(exact_q, 3.0));
-                tiers.push((Occur::Should, boosted));
-            }
-
-            // Escape regex special chars helper for regex queries.
-            fn escape_re(s: &str) -> String {
-                let mut out = String::with_capacity(s.len() * 2);
-                for c in s.chars() {
-                    if r"\.+*?()|[]{}^$".contains(c) {
-                        out.push('\\');
+                // Tier 2 — exact phrase (multi-word PhraseQuery via QueryParser "quoted")
+                if words.len() > 1 {
+                    if let Ok(phrase_q) = query_parser.parse_query(&format!("\"{}\"", q_lower)) {
+                        let boosted = Box::new(tantivy::query::BoostQuery::new(phrase_q, 6.0));
+                        tiers.push((Occur::Should, boosted));
                     }
-                    out.push(c);
                 }
-                out
-            }
 
-            // Tier 4 — prefix per word using RegexQuery("word.*") directly.
-            // IMPORTANT: Do NOT use QueryParser with "word*" here — the standard TEXT
-            // tokenizer strips the `*` before QueryParser can treat it as a wildcard,
-            // making it a plain TermQuery that only matches the exact token "word".
-            // RegexQuery("afads.*") matches every term in the dictionary that starts
-            // with "afads", e.g. the token "afadsffsdfsdfsdf" from the name field.
-            {
-                let prefix_clauses: Vec<(Occur, Box<dyn Query>)> = words
-                    .iter()
-                    .filter_map(|w| {
-                        let pattern = format!("{}.*", escape_re(w));
-                        RegexQuery::from_pattern(&pattern, si.name).ok().map(|rq| {
-                            let boosted: Box<dyn Query> =
-                                Box::new(tantivy::query::BoostQuery::new(Box::new(rq), 1.5));
-                            (Occur::Must, boosted)
-                        })
-                    })
-                    .collect();
-                if prefix_clauses.len() == words.len() {
-                    let prefix_and = Box::new(BooleanQuery::new(prefix_clauses));
-                    tiers.push((Occur::Should, prefix_and as Box<dyn Query>));
-                }
-            }
-
-            // Tier 4.5 — n-gram substring search (infix / LIKE '%%' match).
-            // Generate n-grams manually from the query string and create a TermQuery
-            // for each n-gram in the name_ngram field (indexed by NgramTokenizer).
-            // This is reliable because:
-            //   a) We produce the same n-grams the tokenizer produces at index time.
-            //   b) We use TermQuery directly — no QueryParser tokenizer confusion.
-            // A document matches if it contains ANY of the query's n-grams (Should/OR).
-            {
-                let q_ngram = q_lower.replace(' ', "");
-                if q_ngram.len() >= 3 {
-                    let chars: Vec<char> = q_ngram.chars().collect();
-                    let mut ngram_should: Vec<(Occur, Box<dyn Query>)> = Vec::new();
-
-                    for gram_size in 3usize..=10usize {
-                        if chars.len() < gram_size {
-                            break;
-                        }
-                        for i in 0..=(chars.len() - gram_size) {
-                            let gram: String = chars[i..i + gram_size].iter().collect();
-                            let term = Term::from_field_text(si.name_ngram, &gram);
-                            let tq: Box<dyn Query> =
+                // Tier 3 — all words must appear (AND of exact TermQuery per word)
+                if words.len() > 1 {
+                    let and_clauses: Vec<(Occur, Box<dyn Query>)> = words
+                        .iter()
+                        .map(|w| {
+                            let term = Term::from_field_text(si.name, w);
+                            let q: Box<dyn Query> =
                                 Box::new(TermQuery::new(term, IndexRecordOption::Basic));
-                            ngram_should.push((Occur::Should, tq));
-                        }
-                    }
-
-                    if !ngram_should.is_empty() {
-                        let ngram_q = Box::new(BooleanQuery::new(ngram_should));
-                        let boosted = Box::new(tantivy::query::BoostQuery::new(ngram_q, 1.2));
-                        tiers.push((Occur::Should, boosted as Box<dyn Query>));
-                    }
+                            (Occur::Must, q)
+                        })
+                        .collect();
+                    let and_query = Box::new(BooleanQuery::new(and_clauses));
+                    let boosted = Box::new(tantivy::query::BoostQuery::new(and_query, 3.0));
+                    tiers.push((Occur::Should, boosted));
                 }
-            }
 
-            // Tier 4.7 — Infix substring match (LIKE '%word%') using RegexQuery directly.
-            // This is like SQL LIKE '%word%'. Only applied if the query word is at least
-            // 2 characters long (to prevent matching everything on 1-char queries).
-            {
-                let infix_clauses: Vec<(Occur, Box<dyn Query>)> = words
-                    .iter()
-                    .filter_map(|w| {
-                        if w.len() >= 2 {
-                            let pattern = format!(".*{}.*", escape_re(w));
+                // Tier 3b — single word: exact term match also at 3.0
+                if words.len() == 1 {
+                    let term = Term::from_field_text(si.name, words[0]);
+                    let exact_q = Box::new(TermQuery::new(term, IndexRecordOption::Basic));
+                    let boosted = Box::new(tantivy::query::BoostQuery::new(exact_q, 3.0));
+                    tiers.push((Occur::Should, boosted));
+                }
+
+                // Tier 4 — prefix per word using RegexQuery("word.*") directly.
+                {
+                    let prefix_clauses: Vec<(Occur, Box<dyn Query>)> = words
+                        .iter()
+                        .filter_map(|w| {
+                            let pattern = format!("{}.*", escape_re(w));
                             RegexQuery::from_pattern(&pattern, si.name).ok().map(|rq| {
                                 let boosted: Box<dyn Query> =
-                                    Box::new(tantivy::query::BoostQuery::new(Box::new(rq), 1.1));
+                                    Box::new(tantivy::query::BoostQuery::new(Box::new(rq), 1.5));
                                 (Occur::Must, boosted)
                             })
-                        } else {
-                            None
+                        })
+                        .collect();
+                    if prefix_clauses.len() == words.len() {
+                        let prefix_and = Box::new(BooleanQuery::new(prefix_clauses));
+                        tiers.push((Occur::Should, prefix_and as Box<dyn Query>));
+                    }
+                }
+
+                // Tier 4.5 — n-gram substring search (infix / LIKE '%%' match).
+                {
+                    let q_ngram = q_lower.replace(' ', "");
+                    if q_ngram.len() >= 3 {
+                        let chars: Vec<char> = q_ngram.chars().collect();
+                        let mut ngram_should: Vec<(Occur, Box<dyn Query>)> = Vec::new();
+
+                        for gram_size in 3usize..=10usize {
+                            if chars.len() < gram_size {
+                                break;
+                            }
+                            for i in 0..=(chars.len() - gram_size) {
+                                let gram: String = chars[i..i + gram_size].iter().collect();
+                                let term = Term::from_field_text(si.name_ngram, &gram);
+                                let tq: Box<dyn Query> =
+                                    Box::new(TermQuery::new(term, IndexRecordOption::Basic));
+                                ngram_should.push((Occur::Should, tq));
+                            }
                         }
-                    })
-                    .collect();
-                if infix_clauses.len() == words.len() {
-                    let infix_and = Box::new(BooleanQuery::new(infix_clauses));
-                    tiers.push((Occur::Should, infix_and as Box<dyn Query>));
-                }
-            }
 
-            // Tier 5 — fuzzy per word (edit distance scales with word length)
-            // Only applied if fuzzy is enabled in config and to words longer than 2 chars to avoid false positives.
-            let config = config_mgr::load_config();
-            if config.fuzzy {
-                let fuzzy_clauses: Vec<(Occur, Box<dyn Query>)> = words
-                    .iter()
-                    .filter(|w| w.len() > 2)
-                    .map(|w| {
-                        let term = Term::from_field_text(si.name, w);
-                        let max_dist = if w.len() > 5 { 2u8 } else { 1u8 };
-                        let fq = FuzzyTermQuery::new(term, max_dist, true);
-                        let boosted: Box<dyn Query> =
-                            Box::new(tantivy::query::BoostQuery::new(Box::new(fq), 0.8));
-                        (Occur::Must, boosted)
-                    })
-                    .collect();
-                if !fuzzy_clauses.is_empty() {
-                    let fuzzy_and = Box::new(BooleanQuery::new(fuzzy_clauses));
-                    tiers.push((Occur::Should, fuzzy_and as Box<dyn Query>));
+                        if !ngram_should.is_empty() {
+                            let ngram_q = Box::new(BooleanQuery::new(ngram_should));
+                            let boosted = Box::new(tantivy::query::BoostQuery::new(ngram_q, 1.2));
+                            tiers.push((Occur::Should, boosted as Box<dyn Query>));
+                        }
+                    }
                 }
-            }
 
-            // The outer Must ensures at least one tier matches (any hit qualifies).
-            // Using a min_should_match of 1 via a BooleanQuery with Should clauses:
-            let text_query = Box::new(BooleanQuery::new(tiers));
-            sub_queries.push((Occur::Must, text_query));
+                // Tier 4.7 — Infix substring match (LIKE '%word%') using RegexQuery directly.
+                {
+                    let infix_clauses: Vec<(Occur, Box<dyn Query>)> = words
+                        .iter()
+                        .filter_map(|w| {
+                            if w.len() >= 2 {
+                                let pattern = format!(".*{}.*", escape_re(w));
+                                RegexQuery::from_pattern(&pattern, si.name).ok().map(|rq| {
+                                    let boosted: Box<dyn Query> = Box::new(
+                                        tantivy::query::BoostQuery::new(Box::new(rq), 1.1),
+                                    );
+                                    (Occur::Must, boosted)
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if infix_clauses.len() == words.len() {
+                        let infix_and = Box::new(BooleanQuery::new(infix_clauses));
+                        tiers.push((Occur::Should, infix_and as Box<dyn Query>));
+                    }
+                }
+
+                // Tier 5 — fuzzy per word (edit distance scales with word length)
+                {
+                    let fuzzy_clauses: Vec<(Occur, Box<dyn Query>)> = words
+                        .iter()
+                        .filter(|w| w.len() > 2)
+                        .map(|w| {
+                            let term = Term::from_field_text(si.name, w);
+                            let max_dist = if w.len() > 5 { 2u8 } else { 1u8 };
+                            let fq = FuzzyTermQuery::new(term, max_dist, true);
+                            let boosted: Box<dyn Query> =
+                                Box::new(tantivy::query::BoostQuery::new(Box::new(fq), 0.8));
+                            (Occur::Must, boosted)
+                        })
+                        .collect();
+                    if !fuzzy_clauses.is_empty() {
+                        let fuzzy_and = Box::new(BooleanQuery::new(fuzzy_clauses));
+                        tiers.push((Occur::Should, fuzzy_and as Box<dyn Query>));
+                    }
+                }
+
+                // The outer Must ensures at least one tier matches (any hit qualifies).
+                let text_query = Box::new(BooleanQuery::new(tiers));
+                sub_queries.push((Occur::Must, text_query));
+            }
+        } else {
+            // --- Default exact case-insensitive substring search ---
+            let pattern = format!(".*{}.*", escape_re(&q_lower));
+            let exact_q = RegexQuery::from_pattern(&pattern, si.name_lower)
+                .map_err(|e| format!("Failed to compile regex query: {}", e))?;
+            sub_queries.push((Occur::Must, Box::new(exact_q)));
         }
     } else {
         sub_queries.push((Occur::Must, Box::new(AllQuery)));
@@ -935,4 +936,92 @@ pub fn execute_search(
         }
     }
     Ok(docs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tantivy::TantivyDocument;
+
+    #[test]
+    fn test_exact_substring_search() {
+        let si = init_search_index().unwrap();
+        let mut writer_guard = si.writer.lock().unwrap();
+        writer_guard.delete_all_documents().unwrap();
+
+        let names = vec!["MyImportantFile.txt", "readme.md", "DRAFT_PROPOSAL.docx"];
+        for name in names {
+            let mut doc = TantivyDocument::new();
+            doc.add_text(si.name, name);
+            doc.add_text(si.name_lower, name.to_lowercase());
+            doc.add_text(si.name_ngram, name.to_lowercase());
+            doc.add_text(si.path, "C:/test");
+            doc.add_text(si.ext, "txt");
+            doc.add_text(si.volume, "C:");
+            doc.add_u64(si.size, 100);
+            doc.add_i64(si.modified_at, 12345678);
+            doc.add_u64(si.is_directory, 0);
+            doc.add_text(si.uid, format!("C:-{}", name));
+            writer_guard.add_document(doc).unwrap();
+        }
+        writer_guard.commit().unwrap();
+        si.reader.reload().unwrap();
+        drop(writer_guard);
+
+        // 1. Lowercase search query matching mixed case filename
+        let hits = execute_search(
+            "important",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            10,
+            false,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        let matched_name = hits[0].0.get_first(si.name).unwrap().as_str().unwrap();
+        assert_eq!(matched_name, "MyImportantFile.txt");
+
+        // 2. Uppercase search query matching lowercase filename
+        let hits = execute_search(
+            "README", None, None, None, None, None, None, None, None, None, 10, false,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        let matched_name = hits[0].0.get_first(si.name).unwrap().as_str().unwrap();
+        assert_eq!(matched_name, "readme.md");
+
+        // 3. Mixed case query matching uppercase filename
+        let hits = execute_search(
+            "draft_proposal",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            10,
+            false,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 1);
+        let matched_name = hits[0].0.get_first(si.name).unwrap().as_str().unwrap();
+        assert_eq!(matched_name, "DRAFT_PROPOSAL.docx");
+
+        // 4. Query that shouldn't match (not substring)
+        let hits = execute_search(
+            "imptnt", None, None, None, None, None, None, None, None, None, 10, false,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 0);
+    }
 }
