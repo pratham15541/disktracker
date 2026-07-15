@@ -15,7 +15,8 @@ members = [
     "crates/agent",
 ]
 [workspace.metadata.release]
-pre-release-hook = ["node", "scripts/update-versions.js"]
+publish = false
+pre-release-hook = ["node", "-e", "const path = require('path'); const root = require('child_process').execSync('git rev-parse --show-toplevel').toString().trim(); require(path.join(root, 'scripts/update-versions.js'));"]
 shared-version = true
 tag-name = "v{{version}}"
 
