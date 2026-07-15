@@ -14,7 +14,10 @@ members = [
     "crates/common",
     "crates/agent",
 ]
+[workspace.metadata.release]
+pre-release-hook = ["node", "scripts/update-versions.js"]
+shared-version = true
+tag-name = "v{{version}}"
 
 [patch.crates-io]
 rust-langgraph = { path = "crates/rust-langgraph" }
-

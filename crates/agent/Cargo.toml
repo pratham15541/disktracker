@@ -1,13 +1,13 @@
 [package]
 name = "agent"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2021"
 
 [dependencies]
 tokio = { version = "1.0", features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-rust-langgraph = { version = "0.1.1", features = ["openai", "openrouter", "prebuilt", "sqlite"] }
+rust-langgraph = { version = "2.0.0", features = ["openai", "openrouter", "prebuilt", "sqlite"] }
 keyring = "4.1"
 config-mgr = { path = "../config" }
 storage = { path = "../storage" }

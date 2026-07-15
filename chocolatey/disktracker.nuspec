@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>disktracker</id>
+    <version>2.0.0</version>
+    <title>DiskTracker</title>
+    <authors>Pratham Parikh</authors>
+    <owners>Pratham Parikh</owners>
+    <projectUrl>https://github.com/pratham15541/disktracker</projectUrl>
+    <licenseUrl>https://github.com/pratham15541/disktracker/blob/main/LICENSE</licenseUrl>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <description>DiskTracker — Windows file-system observation daemon and CLI tool</description>
+    <summary>Windows file-system observation daemon and CLI tool</summary>
+    <tags>disktracker cli windows filesystem admin</tags>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>

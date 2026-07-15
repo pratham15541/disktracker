@@ -8,6 +8,7 @@ const PIPE_PATH: &str = r"\\.\pipe\disktracker";
 
 #[derive(Parser)]
 #[command(name = "disktracker")]
+#[command(version)]
 #[command(about = "DiskTracker — Windows file-system observation daemon", long_about = None)]
 struct Cli {
     /// Output raw JSON instead of human-readable text

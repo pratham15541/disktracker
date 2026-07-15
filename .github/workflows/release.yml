@@ -1,0 +1,210 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build (Windows x64)
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build (Windows - static CRT)
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo build --release -p disktracker --bin disktracker --target x86_64-pc-windows-msvc
+
+      - name: Package (Windows)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          $archive = "dist/disktracker-${{ github.ref_name }}-windows-x64.zip"
+          Compress-Archive -Path "target/x86_64-pc-windows-msvc/release/disktracker.exe" -DestinationPath $archive
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: disktracker-x86_64-pc-windows-msvc
+          path: dist/*
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: disktracker-*
+          merge-multiple: true
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            disktracker-*
+
+  publish-npm:
+    name: Publish npm
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - name: Check if version already published
+        id: check-npm
+        working-directory: npm
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view disktracker@$VERSION version >/dev/null 2>&1; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Version $VERSION is already published on npm. Skipping publish."
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install dependencies
+        if: steps.check-npm.outputs.exists == 'false'
+        working-directory: npm
+        run: npm install --ignore-scripts
+
+      - name: Verify package contents
+        if: steps.check-npm.outputs.exists == 'false'
+        working-directory: npm
+        run: npm pack --dry-run
+
+      - name: Publish package
+        if: steps.check-npm.outputs.exists == 'false'
+        working-directory: npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+  publish-chocolatey:
+    name: Publish Chocolatey
+    needs: release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: disktracker-*-pc-windows-msvc
+          path: artifacts
+          merge-multiple: true
+
+      - name: Prepare Chocolatey package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $tag = '${{ github.ref_name }}'
+          $version = $tag -replace '^v', ''
+          $x64Archive = Join-Path $PWD "artifacts\disktracker-$tag-windows-x64.zip"
+
+          if (-not (Test-Path $x64Archive)) {
+            throw "Missing Chocolatey x64 archive: $x64Archive"
+          }
+
+          $checksumX64 = (Get-FileHash $x64Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $nuspecPath = 'chocolatey\disktracker.nuspec'
+          $nuspec = Get-Content -Raw $nuspecPath
+          $nuspec = $nuspec -replace '<version>[^<]+</version>', "<version>$version</version>"
+          Set-Content -Path $nuspecPath -Value $nuspec -NoNewline
+
+          $installPath = 'chocolatey\tools\chocolateyinstall.ps1'
+          $install = Get-Content -Raw $installPath
+          $install = $install.Replace('__RELEASE_TAG__', $tag)
+          $install = $install.Replace('__CHECKSUM_X64__', $checksumX64)
+          Set-Content -Path $installPath -Value $install -NoNewline
+
+          $verificationPath = 'chocolatey\legal\VERIFICATION.txt'
+          $verification = Get-Content -Raw $verificationPath
+          $verification = $verification.Replace('__RELEASE_TAG__', $tag)
+          $verification = $verification.Replace('__CHECKSUM_X64__', $checksumX64)
+          Set-Content -Path $verificationPath -Value $verification -NoNewline
+
+      - name: Pack Chocolatey package
+        shell: pwsh
+        working-directory: chocolatey
+        run: choco pack disktracker.nuspec --output-directory ..\choco-packages
+
+      - name: Publish Chocolatey package
+        shell: pwsh
+        env:
+          CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if (-not $env:CHOCOLATEY_API_KEY) {
+            throw 'CHOCOLATEY_API_KEY secret is required to publish to Chocolatey.'
+          }
+
+          $tag = '${{ github.ref_name }}'
+          $version = $tag -replace '^v', ''
+          
+          # Check if version already exists on Chocolatey
+          $url = "https://community.chocolatey.org/api/v2/Packages(Id='disktracker',Version='$version')"
+          $exists = $false
+          try {
+              $resp = Invoke-WebRequest -Uri $url -Method Head -UseBasicParsing -ErrorAction Stop
+              if ($resp.StatusCode -eq 200) { $exists = $true }
+          } catch {
+              # 404 or other errors mean it doesn't exist
+          }
+
+          if ($exists) {
+              Write-Output "Version $version is already published on Chocolatey. Skipping push."
+              exit 0
+          }
+
+          $package = Get-ChildItem choco-packages -Filter 'disktracker.*.nupkg' | Select-Object -First 1
+          if (-not $package) {
+            throw 'Chocolatey package was not created.'
+          }
+
+          $packagePath = $package.FullName
+          choco push $packagePath --source https://push.chocolatey.org/ --api-key $env:CHOCOLATEY_API_KEY
+
+  winget:
+    name: Publish to WinGet
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish release to WinGet
+        uses: vedantmgoyal9/winget-releaser@v2
+        with:
+          identifier: pratham15541.disktracker
+          release-tag: ${{ github.ref_name }}
+          installers-regex: '.*windows-.*\.zip$'
+          token: ${{ secrets.WINGET_TOKEN }}

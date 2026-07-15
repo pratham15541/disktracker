@@ -1,0 +1,10 @@
+[book]
+authors = ["Pratham Parikh"]
+language = "en"
+multilingual = false
+src = "src"
+title = "DiskTracker Documentation"
+
+[output.html]
+git-repository-url = "https://github.com/pratham15541/disktracker"
+preferred-dark-theme = "navy"
