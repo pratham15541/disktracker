@@ -17,6 +17,7 @@ config-mgr = { path = "../../crates/config" }
 chrono = "0.4"
 agent = { path = "../../crates/agent" }
 rand = "0.8"
+termimad = "0.31"
 
 
 

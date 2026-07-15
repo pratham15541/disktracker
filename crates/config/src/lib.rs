@@ -21,8 +21,18 @@ pub struct AppConfig {
     pub ai_base_url: Option<String>,
     #[serde(default = "default_ai_model", alias = "model")]
     pub ai_model: Option<String>,
-    #[serde(default = "default_ai_chat_session_store", alias = "chat-session-store")]
+    #[serde(
+        default = "default_ai_chat_session_store",
+        alias = "chat-session-store"
+    )]
     pub ai_chat_session_store: bool,
+    #[serde(
+        default = "default_ai_websearch_provider",
+        alias = "websearch-provider"
+    )]
+    pub ai_websearch_provider: Option<String>,
+    #[serde(alias = "websearch-cx")]
+    pub ai_websearch_cx: Option<String>,
 }
 
 fn default_fuzzy() -> bool {
@@ -47,6 +57,10 @@ fn default_ai_model() -> Option<String> {
 
 fn default_ai_chat_session_store() -> bool {
     false
+}
+
+fn default_ai_websearch_provider() -> Option<String> {
+    Some("duckduckgo".to_string())
 }
 
 fn deserialize_retention<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -103,6 +117,8 @@ impl Default for AppConfig {
             ai_base_url: None,
             ai_model: None,
             ai_chat_session_store: false,
+            ai_websearch_provider: Some("duckduckgo".to_string()),
+            ai_websearch_cx: None,
         }
     }
 }

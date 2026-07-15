@@ -1,4 +1,4 @@
-use api::{JsonRpcRequest, JsonRpcResponse, JsonRpcError};
+use api::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
 use clap::{Parser, Subcommand};
 use core_types::{DaemonState, ProgressSnapshot, VolumeProgress};
 use std::io::Write;
@@ -285,6 +285,15 @@ enum AiCommands {
         /// Record chat sessions by default (true or false)
         #[arg(long)]
         chat_session_store: Option<bool>,
+        /// Set the Websearch provider (e.g. duckduckgo, google, tavily, brave)
+        #[arg(long)]
+        websearch_provider: Option<String>,
+        /// Set the Websearch API Key (committed to Credential Manager)
+        #[arg(long)]
+        websearch_key: Option<String>,
+        /// Set the Google Custom Search engine ID (CX)
+        #[arg(long)]
+        websearch_cx: Option<String>,
     },
     /// Run a structural handshake check with the configured AI provider
     Test,
@@ -305,7 +314,6 @@ enum AiSessionCommands {
         id: String,
     },
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -539,13 +547,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             run_doctor().await;
         }
-        Commands::Uninstall { delete_snapshot, yes } => {
+        Commands::Uninstall {
+            delete_snapshot,
+            yes,
+        } => {
             #[cfg(windows)]
             {
                 // Build relaunch args that preserve flags the user already passed.
                 let mut relaunch: Vec<&str> = vec!["uninstall"];
-                if *delete_snapshot { relaunch.push("--delete-snapshot"); }
-                if *yes             { relaunch.push("--yes"); }
+                if *delete_snapshot {
+                    relaunch.push("--delete-snapshot");
+                }
+                if *yes {
+                    relaunch.push("--yes");
+                }
                 require_admin("uninstall", &relaunch, cli.json);
             }
             if let Err(e) = run_uninstall(*delete_snapshot, *yes).await {
@@ -630,13 +645,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         Commands::Config { subcommand } => match subcommand {
             ConfigCommands::Get { key } => {
-                if key != "retention" && key != "retention-days" && key != "fuzzy" && key != "auto-snapshot" && key != "auto-snapshot-interval" {
+                if key != "retention"
+                    && key != "retention-days"
+                    && key != "fuzzy"
+                    && key != "auto-snapshot"
+                    && key != "auto-snapshot-interval"
+                {
                     let err_msg = "Invalid config key. Valid keys are: retention, retention-days, fuzzy, auto-snapshot, auto-snapshot-interval.\nExamples:\n  disktracker config get fuzzy\n  disktracker config get auto-snapshot\n  disktracker config get auto-snapshot-interval";
                     print_error(
                         cli.json,
                         "E_INVALID_PARAMS",
                         err_msg,
-                        Some(serde_json::json!({ "valid_keys": ["retention", "retention-days", "fuzzy", "auto-snapshot", "auto-snapshot-interval"] })),
+                        Some(
+                            serde_json::json!({ "valid_keys": ["retention", "retention-days", "fuzzy", "auto-snapshot", "auto-snapshot-interval"] }),
+                        ),
                     );
                     std::process::exit(1);
                 }
@@ -669,13 +691,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             ConfigCommands::Set { key, value } => {
-                if key != "retention" && key != "retention-days" && key != "fuzzy" && key != "auto-snapshot" && key != "auto-snapshot-interval" {
+                if key != "retention"
+                    && key != "retention-days"
+                    && key != "fuzzy"
+                    && key != "auto-snapshot"
+                    && key != "auto-snapshot-interval"
+                {
                     let err_msg = "Invalid config key. Valid keys are: retention, retention-days, fuzzy, auto-snapshot, auto-snapshot-interval.\nExamples:\n  disktracker config set auto-snapshot true\n  disktracker config set auto-snapshot-interval 24h\n  disktracker config set auto-snapshot-interval 1min";
                     print_error(
                         cli.json,
                         "E_INVALID_PARAMS",
                         err_msg,
-                        Some(serde_json::json!({ "valid_keys": ["retention", "retention-days", "fuzzy", "auto-snapshot", "auto-snapshot-interval"] })),
+                        Some(
+                            serde_json::json!({ "valid_keys": ["retention", "retention-days", "fuzzy", "auto-snapshot", "auto-snapshot-interval"] }),
+                        ),
                     );
                     std::process::exit(1);
                 }
@@ -691,14 +720,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if cli.json {
                                 println!("{}", serde_json::to_string_pretty(&result).unwrap());
                             } else {
-                                let val = result
-                                    .get("value")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let msg = result
-                                    .get("message")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
+                                let val =
+                                    result.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                                let msg =
+                                    result.get("message").and_then(|v| v.as_str()).unwrap_or("");
                                 if !msg.is_empty() {
                                     println!("Set {} to {}. {}", key, val, msg);
                                 } else {
@@ -980,9 +1005,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         width_mod = max_mod
                                     );
 
-                                    let mut sorted_children: Vec<&TreeNode> = node.children.values().collect();
+                                    let mut sorted_children: Vec<&TreeNode> =
+                                        node.children.values().collect();
                                     sorted_children.sort_by(|a, b| {
-                                        b.score.partial_cmp(&a.score)
+                                        b.score
+                                            .partial_cmp(&a.score)
                                             .unwrap_or(std::cmp::Ordering::Equal)
                                             .then_with(|| a.name.cmp(&b.name))
                                     });
@@ -1112,7 +1139,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     leaf.attributes = attr_flags;
                                     leaf.size_str = size_str;
                                     leaf.modified_str = dt;
-                                    leaf.score = item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                                    leaf.score =
+                                        item.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                                 }
 
                                 println!(
@@ -1133,7 +1161,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
 
                                 fn compute_node_scores(node: &mut TreeNode) -> f64 {
-                                    let mut max_score = if node.is_match { node.score } else { 0.0 };
+                                    let mut max_score =
+                                        if node.is_match { node.score } else { 0.0 };
                                     for child in node.children.values_mut() {
                                         let child_score = compute_node_scores(child);
                                         if child_score > max_score {
@@ -1150,7 +1179,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 let mut sorted_roots: Vec<&TreeNode> = roots.values().collect();
                                 sorted_roots.sort_by(|a, b| {
-                                    b.score.partial_cmp(&a.score)
+                                    b.score
+                                        .partial_cmp(&a.score)
                                         .unwrap_or(std::cmp::Ordering::Equal)
                                         .then_with(|| a.name.cmp(&b.name))
                                 });
@@ -1255,7 +1285,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             match rpc_res {
                 Ok(resp) => {
                     if let Some(err) = resp.error {
-                        let code_owned = err.data.as_ref()
+                        let code_owned = err
+                            .data
+                            .as_ref()
                             .and_then(|d| d.get("code"))
                             .and_then(|c| c.as_str())
                             .map(|s| s.to_string())
@@ -1274,12 +1306,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .get("truncated")
                             .and_then(|v| v.as_bool())
                             .unwrap_or(false);
-                        let next_cursor = result
-                            .get("next_cursor")
-                            .and_then(|v| v.as_str());
-                        let prev_cursor = result
-                            .get("prev_cursor")
-                            .and_then(|v| v.as_str());
+                        let next_cursor = result.get("next_cursor").and_then(|v| v.as_str());
+                        let prev_cursor = result.get("prev_cursor").and_then(|v| v.as_str());
 
                         if *json {
                             println!("{}", serde_json::to_string_pretty(&results).unwrap());
@@ -1290,7 +1318,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             if results.is_empty() {
                                 println!("No history found for: {}", resolved_path);
-                                if let Some(debug) = result.get("debug_info").and_then(|v| v.as_str()) {
+                                if let Some(debug) =
+                                    result.get("debug_info").and_then(|v| v.as_str())
+                                {
                                     println!("Debug Info: {}", debug);
                                 }
                                 return Ok(());
@@ -1309,8 +1339,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             for item in &results {
                                 let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
-                                let kind_str = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-                                let size_val = item.get("size_delta").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let kind_str =
+                                    item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                let size_val =
+                                    item.get("size_delta").and_then(|v| v.as_i64()).unwrap_or(0);
                                 let at_str = item.get("at").and_then(|v| v.as_str()).unwrap_or("");
                                 let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
 
@@ -1321,7 +1353,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 max_vol = max_vol.max(vol.len());
                                 max_kind = max_kind.max(kind_str.len());
                                 max_size = max_size.max(size_str.len());
-                                max_date = max_date.max(if *verbose { a_time.len() } else { r_time.len() });
+                                max_date = max_date.max(if *verbose {
+                                    a_time.len()
+                                } else {
+                                    r_time.len()
+                                });
                                 max_name = max_name.max(name.len());
 
                                 local_relative_times.push(r_time);
@@ -1332,7 +1368,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if *verbose {
                                 let mut max_seq = 3;
                                 for item in &results {
-                                    let seq = item.get("sequence").and_then(|v| v.as_i64()).unwrap_or(0).to_string();
+                                    let seq = item
+                                        .get("sequence")
+                                        .and_then(|v| v.as_i64())
+                                        .unwrap_or(0)
+                                        .to_string();
                                     max_seq = max_seq.max(seq.len());
                                 }
                                 println!(
@@ -1346,23 +1386,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                                 println!(
                                     "{}",
-                                    "-".repeat(max_seq + max_date + max_kind + max_size + max_name + 18)
+                                    "-".repeat(
+                                        max_seq + max_date + max_kind + max_size + max_name + 18
+                                    )
                                 );
                                 let mut prev_names = std::collections::HashMap::new();
                                 for (i, item) in results.iter().enumerate() {
-                                    let seq = item.get("sequence").and_then(|v| v.as_i64()).unwrap_or(0);
+                                    let seq =
+                                        item.get("sequence").and_then(|v| v.as_i64()).unwrap_or(0);
                                     let date_str = &local_absolute_times[i];
-                                    let kind_str = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                    let kind_str =
+                                        item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                                     let size_str = &size_deltas[i];
-                                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                    let file_id = item.get("file_id").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    let parent_id = item.get("parent_file_id").and_then(|v| v.as_u64()).unwrap_or(0);
-                                    let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("");
+                                    let name =
+                                        item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                    let file_id =
+                                        item.get("file_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let parent_id = item
+                                        .get("parent_file_id")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    let source =
+                                        item.get("source").and_then(|v| v.as_str()).unwrap_or("");
 
                                     let mut details_parts = Vec::new();
                                     if kind_str.eq_ignore_ascii_case("renamed") {
                                         if let Some(old_name) = prev_names.get(&file_id) {
-                                            details_parts.push(format!("Renamed from {}", old_name));
+                                            details_parts
+                                                .push(format!("Renamed from {}", old_name));
                                         } else {
                                             details_parts.push("Renamed".to_string());
                                         }
@@ -1393,16 +1444,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                                 println!(
                                     "{}",
-                                    "-".repeat(max_vol + max_kind + max_size + max_date + max_name + 18)
+                                    "-".repeat(
+                                        max_vol + max_kind + max_size + max_date + max_name + 18
+                                    )
                                 );
                                 let mut prev_names = std::collections::HashMap::new();
                                 for (i, item) in results.iter().enumerate() {
-                                    let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
-                                    let kind_str = item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                                    let vol =
+                                        item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
+                                    let kind_str =
+                                        item.get("kind").and_then(|v| v.as_str()).unwrap_or("");
                                     let size_str = &size_deltas[i];
                                     let date_str = &local_relative_times[i];
-                                    let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                                    let file_id = item.get("file_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                                    let name =
+                                        item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                                    let file_id =
+                                        item.get("file_id").and_then(|v| v.as_u64()).unwrap_or(0);
 
                                     let mut details = String::new();
                                     if kind_str.eq_ignore_ascii_case("renamed") {
@@ -1438,7 +1495,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             if *verbose {
-                                if let Some(debug) = result.get("debug_info").and_then(|v| v.as_str()) {
+                                if let Some(debug) =
+                                    result.get("debug_info").and_then(|v| v.as_str())
+                                {
                                     println!("\nDebug Info: {}", debug);
                                 }
                             }
@@ -1479,7 +1538,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 None => None,
             };
-            
+
             // Resolve volume from volume or path
             let mut resolved_vol = volume.clone().map(|v| {
                 if v.len() == 1 {
@@ -1493,7 +1552,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(vol_from_path) = resolve_volume_from_path(p) {
                     if let Some(ref r_vol) = resolved_vol {
                         if r_vol != &vol_from_path {
-                            print_error(cli.json, "E_INVALID_PARAMS", "Path filter and volume filter do not match.", None);
+                            print_error(
+                                cli.json,
+                                "E_INVALID_PARAMS",
+                                "Path filter and volume filter do not match.",
+                                None,
+                            );
                             std::process::exit(1);
                         }
                     }
@@ -1533,7 +1597,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let show_spinner = !cli.json;
             let spinner = if show_spinner {
-                Some(Spinner::start("Calculating and loading top items...".to_string()))
+                Some(Spinner::start(
+                    "Calculating and loading top items...".to_string(),
+                ))
             } else {
                 None
             };
@@ -1562,11 +1628,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .and_then(|v| v.as_array())
                             .cloned()
                             .unwrap_or_default();
-                        
-                        let next_cursor = result
-                            .get("next_cursor")
-                            .and_then(|v| v.as_str());
-                        
+
+                        let next_cursor = result.get("next_cursor").and_then(|v| v.as_str());
+
                         let volumes_incomplete = result
                             .get("volumes_incomplete")
                             .and_then(|v| v.as_array())
@@ -1581,14 +1645,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut shown_warnings = std::collections::HashSet::new();
                         for item in &results {
                             if let Some(vol) = item.get("volume").and_then(|v| v.as_str()) {
-                                if volumes_incomplete.contains(vol) && shown_warnings.insert(vol.to_string()) {
+                                if volumes_incomplete.contains(vol)
+                                    && shown_warnings.insert(vol.to_string())
+                                {
                                     println!("⚠ Volume {} is currently scanning; results may be incomplete.", vol);
                                 }
                             }
                         }
                         if let Some(ref vol) = resolved_vol {
-                            if volumes_incomplete.contains(vol) && shown_warnings.insert(vol.to_string()) {
-                                println!("⚠ Volume {} is currently scanning; results may be incomplete.", vol);
+                            if volumes_incomplete.contains(vol)
+                                && shown_warnings.insert(vol.to_string())
+                            {
+                                println!(
+                                    "⚠ Volume {} is currently scanning; results may be incomplete.",
+                                    vol
+                                );
                             }
                         }
 
@@ -1605,11 +1676,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut max_name = 4;
                         let mut max_size_or_delta = 5;
                         let mut max_type = 4;
-                        
+
                         // Verbose-only column widths
                         let mut max_exact = 11; // "Exact Bytes" or "Exact Delta"
-                        let mut max_vol = 6;    // "Volume"
-                        let mut max_path = 9;   // "Full Path"
+                        let mut max_vol = 6; // "Volume"
+                        let mut max_path = 9; // "Full Path"
                         let mut max_item_count = 10; // "Item Count"
                         let mut max_bounds = 24; // "Window/Snapshot Bounds"
 
@@ -1620,7 +1691,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
                             let vol = item.get("volume").and_then(|v| v.as_str()).unwrap_or("");
                             let rel_path = item.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                            let is_dir = item.get("is_directory").and_then(|v| v.as_bool()).unwrap_or(false);
+                            let is_dir = item
+                                .get("is_directory")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
                             let type_str = if is_dir { "Folder" } else { "File" };
 
                             let size_or_delta_str = if !is_interval_mode {
@@ -1630,7 +1704,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let ch = item.get("churn").and_then(|v| v.as_u64()).unwrap_or(0);
                                 ch.to_string()
                             } else {
-                                let sz_d = item.get("size_delta").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let sz_d =
+                                    item.get("size_delta").and_then(|v| v.as_i64()).unwrap_or(0);
                                 format_size_delta(sz_d)
                             };
 
@@ -1640,7 +1715,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else if show_churn {
                                 String::new()
                             } else {
-                                let sz_d = item.get("size_delta").and_then(|v| v.as_i64()).unwrap_or(0);
+                                let sz_d =
+                                    item.get("size_delta").and_then(|v| v.as_i64()).unwrap_or(0);
                                 if sz_d > 0 {
                                     format!("+{} B", sz_d)
                                 } else if sz_d < 0 {
@@ -1657,27 +1733,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             };
 
                             let item_count_str = if is_dir {
-                                item.get("item_count").and_then(|v| v.as_u64()).unwrap_or(0).to_string()
+                                item.get("item_count")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(0)
+                                    .to_string()
                             } else {
                                 "-".to_string()
                             };
 
                             let bounds_str = if is_interval_mode {
-                                let start = result.get("window_start").and_then(|v| v.as_str()).unwrap_or("");
-                                let end = result.get("window_end").and_then(|v| v.as_str()).unwrap_or("");
+                                let start = result
+                                    .get("window_start")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                let end = result
+                                    .get("window_end")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
                                 if start.is_empty() || end.is_empty() {
                                     "-".to_string()
                                 } else {
-                                    let start_concise = if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(start) {
+                                    let start_concise = if let Ok(dt) =
+                                        chrono::DateTime::parse_from_rfc3339(start)
+                                    {
                                         dt.format("%Y-%m-%d %H:%M:%S").to_string()
                                     } else {
                                         start.to_string()
                                     };
-                                    let end_concise = if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(end) {
-                                        dt.format("%Y-%m-%d %H:%M:%S").to_string()
-                                    } else {
-                                        end.to_string()
-                                    };
+                                    let end_concise =
+                                        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(end) {
+                                            dt.format("%Y-%m-%d %H:%M:%S").to_string()
+                                        } else {
+                                            end.to_string()
+                                        };
                                     format!("[{}..{}]", start_concise, end_concise)
                                 }
                             } else {
@@ -1725,7 +1813,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                                 println!(
                                     "{}",
-                                    "-".repeat(max_rank + max_name + max_size_or_delta + max_exact + max_type + max_vol + max_path + max_item_count + 21)
+                                    "-".repeat(
+                                        max_rank
+                                            + max_name
+                                            + max_size_or_delta
+                                            + max_exact
+                                            + max_type
+                                            + max_vol
+                                            + max_path
+                                            + max_item_count
+                                            + 21
+                                    )
                                 );
                                 for row in formatted_rows {
                                     println!(
@@ -1753,7 +1851,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                                 println!(
                                     "{}",
-                                    "-".repeat(max_rank + max_name + max_path + max_size_or_delta + max_type + 12)
+                                    "-".repeat(
+                                        max_rank
+                                            + max_name
+                                            + max_path
+                                            + max_size_or_delta
+                                            + max_type
+                                            + 12
+                                    )
                                 );
                                 for row in formatted_rows {
                                     println!(
@@ -1785,7 +1890,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                     println!(
                                         "{}",
-                                        "-".repeat(max_rank + max_name + max_size_or_delta + max_type + max_bounds + max_item_count + 15)
+                                        "-".repeat(
+                                            max_rank
+                                                + max_name
+                                                + max_size_or_delta
+                                                + max_type
+                                                + max_bounds
+                                                + max_item_count
+                                                + 15
+                                        )
                                     );
                                     for row in formatted_rows {
                                         println!(
@@ -1813,7 +1926,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                     println!(
                                         "{}",
-                                        "-".repeat(max_rank + max_name + max_size_or_delta + max_exact + max_type + max_bounds + max_item_count + 18)
+                                        "-".repeat(
+                                            max_rank
+                                                + max_name
+                                                + max_size_or_delta
+                                                + max_exact
+                                                + max_type
+                                                + max_bounds
+                                                + max_item_count
+                                                + 18
+                                        )
                                     );
                                     for row in formatted_rows {
                                         println!(
@@ -1841,7 +1963,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                                 println!(
                                     "{}",
-                                    "-".repeat(max_rank + max_name + max_path + max_size_or_delta + max_type + 12)
+                                    "-".repeat(
+                                        max_rank
+                                            + max_name
+                                            + max_path
+                                            + max_size_or_delta
+                                            + max_type
+                                            + 12
+                                    )
                                 );
                                 for row in formatted_rows {
                                     println!(
@@ -1872,14 +2001,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Commands::Snapshot { subcommand } => match subcommand {
-            SnapshotCommands::Create { label, path_or_volume, all } => {
+            SnapshotCommands::Create {
+                label,
+                path_or_volume,
+                all,
+            } => {
                 let mut vols_to_snap = Vec::new();
 
                 if *all || path_or_volume.is_none() {
                     match query_status().await {
                         Ok(resp) => {
                             if let Some(res) = resp.result {
-                                if let Some(volumes_map) = res.get("volumes").and_then(|v| v.as_object()) {
+                                if let Some(volumes_map) =
+                                    res.get("volumes").and_then(|v| v.as_object())
+                                {
                                     for vol in volumes_map.keys() {
                                         vols_to_snap.push(vol.clone());
                                     }
@@ -1893,7 +2028,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         vols_to_snap.push(vol);
                     }
                 } else {
-                    let vol = resolve_volume_from_path_or_cwd(path_or_volume.as_deref().unwrap_or(""));
+                    let vol =
+                        resolve_volume_from_path_or_cwd(path_or_volume.as_deref().unwrap_or(""));
                     vols_to_snap.push(vol);
                 }
 
@@ -1909,11 +2045,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             std::process::exit(1);
                         }
                         if let Some(result) = resp.result {
-                            let job_id = result.get("job_id").and_then(|j| j.as_str()).unwrap_or("");
+                            let job_id =
+                                result.get("job_id").and_then(|j| j.as_str()).unwrap_or("");
                             if !cli.json {
-                                println!("Creating snapshot for volumes {:?} (job: {})...", vols_to_snap, job_id);
+                                println!(
+                                    "Creating snapshot for volumes {:?} (job: {})...",
+                                    vols_to_snap, job_id
+                                );
                             }
-                            
+
                             let show_spinner = !cli.json;
                             let mut spinner = if show_spinner {
                                 Some(Spinner::start("Creating snapshot...".to_string()))
@@ -1935,9 +2075,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             std::process::exit(1);
                                         }
                                         if let Some(job_val) = poll_resp.result {
-                                            let completed = job_val.get("completed").and_then(|c| c.as_bool()).unwrap_or(false);
+                                            let completed = job_val
+                                                .get("completed")
+                                                .and_then(|c| c.as_bool())
+                                                .unwrap_or(false);
                                             if completed {
-                                                if let Some(job_err) = job_val.get("error").and_then(|e| e.as_str()) {
+                                                if let Some(job_err) =
+                                                    job_val.get("error").and_then(|e| e.as_str())
+                                                {
                                                     if let Some(s) = spinner.take() {
                                                         s.stop().await;
                                                     }
@@ -1948,21 +2093,53 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     s.stop().await;
                                                 }
                                                 if cli.json {
-                                                    println!("{}", serde_json::to_string_pretty(&job_val).unwrap());
+                                                    println!(
+                                                        "{}",
+                                                        serde_json::to_string_pretty(&job_val)
+                                                            .unwrap()
+                                                    );
                                                 } else {
-                                                    if let Some(res_details) = job_val.get("result") {
-                                                        let parent_id = res_details.get("id").and_then(|s| s.as_str()).unwrap_or("");
-                                                        let final_label = res_details.get("label").and_then(|l| l.as_str()).unwrap_or("");
+                                                    if let Some(res_details) = job_val.get("result")
+                                                    {
+                                                        let parent_id = res_details
+                                                            .get("id")
+                                                            .and_then(|s| s.as_str())
+                                                            .unwrap_or("");
+                                                        let final_label = res_details
+                                                            .get("label")
+                                                            .and_then(|l| l.as_str())
+                                                            .unwrap_or("");
                                                         println!("Parent Snapshot \"{}\" created successfully (id: {}).", final_label, parent_id);
-                                                        if let Some(vols) = res_details.get("volumes").and_then(|v| v.as_array()) {
+                                                        if let Some(vols) = res_details
+                                                            .get("volumes")
+                                                            .and_then(|v| v.as_array())
+                                                        {
                                                             let child_count = vols.len();
-                                                            for (idx, v) in vols.iter().enumerate() {
-                                                                let is_last_child = idx == child_count - 1;
-                                                                let prefix = if is_last_child { "└── " } else { "├── " };
-                                                                let v_name = v.get("volume").and_then(|s| s.as_str()).unwrap_or("");
-                                                                let child_id = v.get("id").and_then(|s| s.as_str()).unwrap_or("");
-                                                                let seq = v.get("sequence_number").and_then(|s| s.as_i64()).unwrap_or(0);
-                                                                let count = v.get("facts_count").and_then(|s| s.as_i64()).unwrap_or(0);
+                                                            for (idx, v) in vols.iter().enumerate()
+                                                            {
+                                                                let is_last_child =
+                                                                    idx == child_count - 1;
+                                                                let prefix = if is_last_child {
+                                                                    "└── "
+                                                                } else {
+                                                                    "├── "
+                                                                };
+                                                                let v_name = v
+                                                                    .get("volume")
+                                                                    .and_then(|s| s.as_str())
+                                                                    .unwrap_or("");
+                                                                let child_id = v
+                                                                    .get("id")
+                                                                    .and_then(|s| s.as_str())
+                                                                    .unwrap_or("");
+                                                                let seq = v
+                                                                    .get("sequence_number")
+                                                                    .and_then(|s| s.as_i64())
+                                                                    .unwrap_or(0);
+                                                                let count = v
+                                                                    .get("facts_count")
+                                                                    .and_then(|s| s.as_i64())
+                                                                    .unwrap_or(0);
                                                                 println!("{}Volume: {} (ID: {}, Sequence: {}, Facts: {})", prefix, v_name, child_id, seq, count);
                                                             }
                                                         }
@@ -1990,7 +2167,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            SnapshotCommands::List { volume, limit, cursor } => {
+            SnapshotCommands::List {
+                volume,
+                limit,
+                cursor,
+            } => {
                 let params = serde_json::json!({
                     "volume": volume,
                     "limit": limit,
@@ -2005,7 +2186,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         if let Some(result) = resp.result {
                             if cli.json {
-                                println!("{}", serde_json::to_string_pretty(&result.get("results").unwrap()).unwrap());
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&result.get("results").unwrap())
+                                        .unwrap()
+                                );
                             } else {
                                 let results = result
                                     .get("results")
@@ -2019,12 +2204,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
 
                                 for item in &results {
-                                    let parent_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                    let label = item.get("label").and_then(|v| v.as_str()).unwrap_or("");
-                                    let created = item.get("created_at").and_then(|c| c.as_str()).unwrap_or("");
-                                    let daemon = item.get("daemon_version").and_then(|d| d.as_str()).unwrap_or("");
-                                    let schema = item.get("schema_version").and_then(|s| s.as_i64()).unwrap_or(2);
-                                    let retention = item.get("retention_setting").and_then(|r| r.as_str()).unwrap_or("");
+                                    let parent_id =
+                                        item.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                    let label =
+                                        item.get("label").and_then(|v| v.as_str()).unwrap_or("");
+                                    let created = item
+                                        .get("created_at")
+                                        .and_then(|c| c.as_str())
+                                        .unwrap_or("");
+                                    let daemon = item
+                                        .get("daemon_version")
+                                        .and_then(|d| d.as_str())
+                                        .unwrap_or("");
+                                    let schema = item
+                                        .get("schema_version")
+                                        .and_then(|s| s.as_i64())
+                                        .unwrap_or(2);
+                                    let retention = item
+                                        .get("retention_setting")
+                                        .and_then(|r| r.as_str())
+                                        .unwrap_or("");
 
                                     let rel_age = format_relative_time(created);
                                     let abs_time = format_absolute_time(created);
@@ -2035,22 +2234,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             parent_id, label, abs_time, rel_age, daemon, schema, retention
                                         );
                                     } else {
-                                        println!(
-                                            "[{}] {} ({})",
-                                            parent_id, label, rel_age
-                                        );
+                                        println!("[{}] {} ({})", parent_id, label, rel_age);
                                     }
 
-                                    if let Some(vols) = item.get("volumes").and_then(|v| v.as_array()) {
+                                    if let Some(vols) =
+                                        item.get("volumes").and_then(|v| v.as_array())
+                                    {
                                         let child_count = vols.len();
                                         for (idx, vol_val) in vols.iter().enumerate() {
                                             let is_last_child = idx == child_count - 1;
-                                            let prefix = if is_last_child { "└── " } else { "├── " };
+                                            let prefix = if is_last_child {
+                                                "└── "
+                                            } else {
+                                                "├── "
+                                            };
 
-                                            let child_id = vol_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                                            let vol_name = vol_val.get("volume").and_then(|v| v.as_str()).unwrap_or("");
-                                            let seq = vol_val.get("sequence_number").and_then(|s| s.as_i64()).unwrap_or(0);
-                                            let count = vol_val.get("facts_count").and_then(|f| f.as_i64()).unwrap_or(0);
+                                            let child_id = vol_val
+                                                .get("id")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            let vol_name = vol_val
+                                                .get("volume")
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("");
+                                            let seq = vol_val
+                                                .get("sequence_number")
+                                                .and_then(|s| s.as_i64())
+                                                .unwrap_or(0);
+                                            let count = vol_val
+                                                .get("facts_count")
+                                                .and_then(|f| f.as_i64())
+                                                .unwrap_or(0);
 
                                             if cli.verbose {
                                                 println!(
@@ -2077,7 +2291,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            SnapshotCommands::Diff { snapshot_a, snapshot_b, path, limit } => {
+            SnapshotCommands::Diff {
+                snapshot_a,
+                snapshot_b,
+                path,
+                limit,
+            } => {
                 let params = serde_json::json!({
                     "snapshot_a": snapshot_a,
                     "snapshot_b": snapshot_b,
@@ -2106,7 +2325,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         if let Some(result) = resp.result {
                             if cli.json {
-                                println!("{}", serde_json::to_string_pretty(&result.get("results").unwrap()).unwrap());
+                                println!(
+                                    "{}",
+                                    serde_json::to_string_pretty(&result.get("results").unwrap())
+                                        .unwrap()
+                                );
                             } else {
                                 let results = result
                                     .get("results")
@@ -2127,23 +2350,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                 let mut size_deltas = Vec::new();
                                 for item in &results {
-                                    let kind = item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-                                    let size_val = item.get("size_delta").and_then(|s| s.as_i64()).unwrap_or(0);
-                                    let path_str = item.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                                    let fid = item.get("file_id").and_then(|f| f.as_u64()).unwrap_or(0).to_string();
-                                    let pid = item.get("parent_file_id").and_then(|p| p.as_u64()).unwrap_or(0).to_string();
+                                    let kind =
+                                        item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                                    let size_val = item
+                                        .get("size_delta")
+                                        .and_then(|s| s.as_i64())
+                                        .unwrap_or(0);
+                                    let path_str =
+                                        item.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                                    let fid = item
+                                        .get("file_id")
+                                        .and_then(|f| f.as_u64())
+                                        .unwrap_or(0)
+                                        .to_string();
+                                    let pid = item
+                                        .get("parent_file_id")
+                                        .and_then(|p| p.as_u64())
+                                        .unwrap_or(0)
+                                        .to_string();
 
                                     let size_str = format_size_delta(size_val);
                                     size_deltas.push(size_str.clone());
 
                                     max_kind = max_kind.max(kind.len());
                                     max_size = max_size.max(size_str.len());
-                                    
+
                                     // Handle renaming path presentation length
                                     let mut display_path = path_str.to_string();
                                     if kind.eq_ignore_ascii_case("renamed") {
-                                        if let Some(old) = item.get("old_name").and_then(|o| o.as_str()) {
-                                            display_path = format!("{} (Renamed from {})", path_str, old);
+                                        if let Some(old) =
+                                            item.get("old_name").and_then(|o| o.as_str())
+                                        {
+                                            display_path =
+                                                format!("{} (Renamed from {})", path_str, old);
                                         }
                                     }
                                     max_path = max_path.max(display_path.len());
@@ -2162,18 +2401,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                     println!(
                                         "{}",
-                                        "-".repeat(max_fid + max_pid + max_kind + max_size + max_path + 15)
+                                        "-".repeat(
+                                            max_fid + max_pid + max_kind + max_size + max_path + 15
+                                        )
                                     );
                                     for (i, item) in results.iter().enumerate() {
-                                        let fid = item.get("file_id").and_then(|f| f.as_u64()).unwrap_or(0);
-                                        let pid = item.get("parent_file_id").and_then(|p| p.as_u64()).unwrap_or(0);
-                                        let kind = item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                                        let fid = item
+                                            .get("file_id")
+                                            .and_then(|f| f.as_u64())
+                                            .unwrap_or(0);
+                                        let pid = item
+                                            .get("parent_file_id")
+                                            .and_then(|p| p.as_u64())
+                                            .unwrap_or(0);
+                                        let kind =
+                                            item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
                                         let size_str = &size_deltas[i];
-                                        let path_str = item.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                                        let path_str =
+                                            item.get("path").and_then(|p| p.as_str()).unwrap_or("");
                                         let mut display_path = path_str.to_string();
                                         if kind.eq_ignore_ascii_case("renamed") {
-                                            if let Some(old) = item.get("old_name").and_then(|o| o.as_str()) {
-                                                display_path = format!("{} (Renamed from {})", path_str, old);
+                                            if let Some(old) =
+                                                item.get("old_name").and_then(|o| o.as_str())
+                                            {
+                                                display_path =
+                                                    format!("{} (Renamed from {})", path_str, old);
                                             }
                                         }
 
@@ -2228,7 +2480,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 tree_line.push_str("├── ");
                                             }
 
-                                            let formatted_delta = format_size_delta(node.size_delta);
+                                            let formatted_delta =
+                                                format_size_delta(node.size_delta);
                                             match node.kind.as_str() {
                                                 "Created" => {
                                                     tree_line.push_str(&format!(
@@ -2243,7 +2496,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     ));
                                                 }
                                                 "Renamed" => {
-                                                    let old = node.old_name.as_deref().unwrap_or("unknown");
+                                                    let old = node
+                                                        .old_name
+                                                        .as_deref()
+                                                        .unwrap_or("unknown");
                                                     tree_line.push_str(&format!(
                                                         "\x1b[33m~ {} (Renamed from {}, {})\x1b[0m",
                                                         node.name, old, formatted_delta
@@ -2282,28 +2538,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     if is_last { "    " } else { "│   " }
                                                 )
                                             };
-                                            print_diff_tree_node(child, &new_prefix, is_last_child, false);
+                                            print_diff_tree_node(
+                                                child,
+                                                &new_prefix,
+                                                is_last_child,
+                                                false,
+                                            );
                                         }
                                     }
 
-                                    let mut roots: std::collections::BTreeMap<String, DiffTreeNode> =
-                                        std::collections::BTreeMap::new();
+                                    let mut roots: std::collections::BTreeMap<
+                                        String,
+                                        DiffTreeNode,
+                                    > = std::collections::BTreeMap::new();
 
                                     for item in &results {
-                                        let kind = item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-                                        let size_val = item.get("size_delta").and_then(|s| s.as_i64()).unwrap_or(0);
-                                        let path_str = item.get("path").and_then(|p| p.as_str()).unwrap_or("");
-                                        let is_dir = item.get("is_directory").and_then(|v| v.as_bool()).unwrap_or(false);
-                                        let old_name = item.get("old_name").and_then(|o| o.as_str().map(|s| s.to_string()));
+                                        let kind =
+                                            item.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+                                        let size_val = item
+                                            .get("size_delta")
+                                            .and_then(|s| s.as_i64())
+                                            .unwrap_or(0);
+                                        let path_str =
+                                            item.get("path").and_then(|p| p.as_str()).unwrap_or("");
+                                        let is_dir = item
+                                            .get("is_directory")
+                                            .and_then(|v| v.as_bool())
+                                            .unwrap_or(false);
+                                        let old_name = item
+                                            .get("old_name")
+                                            .and_then(|o| o.as_str().map(|s| s.to_string()));
 
-                                        let segments: Vec<&str> = path_str.split('/').filter(|s| !s.is_empty()).collect();
+                                        let segments: Vec<&str> =
+                                            path_str.split('/').filter(|s| !s.is_empty()).collect();
                                         if !segments.is_empty() {
                                             let vol = segments[0];
-                                            let mut curr = roots.entry(vol.to_string()).or_insert_with(|| {
-                                                let mut r = DiffTreeNode::new(vol);
-                                                r.is_directory = true;
-                                                r
-                                            });
+                                            let mut curr =
+                                                roots.entry(vol.to_string()).or_insert_with(|| {
+                                                    let mut r = DiffTreeNode::new(vol);
+                                                    r.is_directory = true;
+                                                    r
+                                                });
 
                                             for i in 1..segments.len() {
                                                 let segment = segments[i];
@@ -2342,27 +2617,67 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-        }
+        },
         Commands::Ai { subcommand } => match subcommand {
-            AiCommands::Config { base_url, api_key, model, chat_session_store } => {
-                if base_url.is_none() && api_key.is_none() && model.is_none() && chat_session_store.is_none() {
+            AiCommands::Config {
+                base_url,
+                api_key,
+                model,
+                chat_session_store,
+                websearch_provider,
+                websearch_key,
+                websearch_cx,
+            } => {
+                if base_url.is_none()
+                    && api_key.is_none()
+                    && model.is_none()
+                    && chat_session_store.is_none()
+                    && websearch_provider.is_none()
+                    && websearch_key.is_none()
+                    && websearch_cx.is_none()
+                {
                     let cfg = config_mgr::load_config();
                     let key_status = match agent::get_api_key() {
                         Ok(_) => "Set (Present in Credential Store)",
                         Err(_) => "Not Set",
                     };
+                    let ws_key_status = match agent::get_websearch_api_key() {
+                        Ok(k) if !k.is_empty() => "Set (Present in Credential Store)",
+                        _ => "Not Set",
+                    };
                     if cli.json {
-                        println!("{}", serde_json::json!({
-                            "base_url": cfg.ai_base_url,
-                            "model": cfg.ai_model,
-                            "chat_session_store": cfg.ai_chat_session_store,
-                            "api_key_status": key_status
-                        }));
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "base_url": cfg.ai_base_url,
+                                "model": cfg.ai_model,
+                                "chat_session_store": cfg.ai_chat_session_store,
+                                "api_key_status": key_status,
+                                "websearch_provider": cfg.ai_websearch_provider,
+                                "websearch_cx": cfg.ai_websearch_cx,
+                                "websearch_key_status": ws_key_status,
+                            })
+                        );
                     } else {
-                        println!("AI Base URL: {}", cfg.ai_base_url.as_deref().unwrap_or("<not configured>"));
-                        println!("AI Model: {}", cfg.ai_model.as_deref().unwrap_or("<not configured>"));
+                        println!(
+                            "AI Base URL: {}",
+                            cfg.ai_base_url.as_deref().unwrap_or("<not configured>")
+                        );
+                        println!(
+                            "AI Model: {}",
+                            cfg.ai_model.as_deref().unwrap_or("<not configured>")
+                        );
                         println!("AI Chat Session Store: {}", cfg.ai_chat_session_store);
                         println!("AI API Key Status: {}", key_status);
+                        println!(
+                            "AI Websearch Provider: {}",
+                            cfg.ai_websearch_provider.as_deref().unwrap_or("duckduckgo")
+                        );
+                        println!(
+                            "AI Websearch CX: {}",
+                            cfg.ai_websearch_cx.as_deref().unwrap_or("<not configured>")
+                        );
+                        println!("AI Websearch API Key Status: {}", ws_key_status);
                     }
                 } else {
                     if let Some(ref key) = api_key {
@@ -2371,10 +2686,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             std::process::exit(1);
                         }
                     }
+                    if let Some(ref ws_k) = websearch_key {
+                        if let Err(e) = agent::set_websearch_api_key(ws_k) {
+                            eprintln!("Error saving Websearch API key: {}", e);
+                            std::process::exit(1);
+                        }
+                    }
                     if let Err(e) = agent::update_ai_config(
                         base_url.clone(),
                         model.clone(),
                         *chat_session_store,
+                        websearch_provider.clone(),
+                        websearch_cx.clone(),
                     ) {
                         eprintln!("Error saving AI configuration: {}", e);
                         std::process::exit(1);
@@ -2409,94 +2732,105 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             AiCommands::Session { subcommand } => match subcommand {
-                AiSessionCommands::List => {
-                    match agent::session_store::list_sessions() {
-                        Ok(sessions) => {
-                            if cli.json {
-                                let list: Vec<_> = sessions.iter().map(|(id, created, q)| {
+                AiSessionCommands::List => match agent::session_store::list_sessions() {
+                    Ok(sessions) => {
+                        if cli.json {
+                            let list: Vec<_> = sessions
+                                .iter()
+                                .map(|(id, created, q)| {
                                     serde_json::json!({
                                         "id": id,
                                         "created_at": created,
                                         "first_question": q
                                     })
-                                }).collect();
-                                println!("{}", serde_json::to_string_pretty(&list).unwrap());
+                                })
+                                .collect();
+                            println!("{}", serde_json::to_string_pretty(&list).unwrap());
+                        } else {
+                            if sessions.is_empty() {
+                                println!("No saved AI sessions found.");
                             } else {
-                                if sessions.is_empty() {
-                                    println!("No saved AI sessions found.");
-                                } else {
-                                    println!("{:<12} | {:<22} | {}", "Session ID", "Created At", "First Question");
-                                    println!("{:-<12}-+-{:-<22}-+-{:-<30}", "", "", "");
-                                    for (id, created, q) in sessions {
-                                        let q_disp = if q.len() > 60 { format!("{}...", &q[..57]) } else { q };
-                                        println!("{:<12} | {:<22} | {}", id, created, q_disp);
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if cli.json {
-                                print_error(true, "E_SESSION_STORE", &e, None);
-                            } else {
-                                eprintln!("Error: {}", e);
-                            }
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                AiSessionCommands::Show { id } => {
-                    match agent::session_store::load_session(id) {
-                        Ok(Some(state)) => {
-                            if cli.json {
-                                println!("{}", serde_json::to_string_pretty(&state).unwrap());
-                            } else {
-                                println!("=== Session Transcript: {} ===", id);
-                                println!("Initial Question: {}\n", state.question);
-                                for msg in &state.messages {
-                                    if msg.role == "system" {
-                                        continue;
-                                    }
-                                    let role_cap = match msg.role.as_str() {
-                                        "user" => "User".to_string(),
-                                        "assistant" => "Assistant".to_string(),
-                                        "tool" => "Tool".to_string(),
-                                        _ => msg.role.to_string(),
+                                println!(
+                                    "{:<12} | {:<22} | {}",
+                                    "Session ID", "Created At", "First Question"
+                                );
+                                println!("{:-<12}-+-{:-<22}-+-{:-<30}", "", "", "");
+                                for (id, created, q) in sessions {
+                                    let q_disp = if q.len() > 60 {
+                                        format!("{}...", &q[..57])
+                                    } else {
+                                        q
                                     };
-                                    println!("\x1b[1m{}:\x1b[0m {}", role_cap, msg.content);
-                                    if let Some(tool_calls) = &msg.tool_calls {
-                                        for tc in tool_calls {
-                                            println!("  └─ Tool Call: {}({})", tc.name, tc.arguments);
-                                        }
-                                    }
-                                    if let Some(tool_call_id) = &msg.tool_call_id {
-                                        println!("  └─ Tool Response ID: {}", tool_call_id);
-                                    }
-                                    println!();
+                                    println!("{:<12} | {:<22} | {}", id, created, q_disp);
                                 }
                             }
                         }
-                        Ok(None) => {
-                            let err_msg = format!("Session ID '{}' not found.", id);
-                            if cli.json {
-                                print_error(true, "E_SESSION_NOT_FOUND", &err_msg, None);
-                            } else {
-                                eprintln!("Error: {}", err_msg);
-                            }
-                            std::process::exit(1);
+                    }
+                    Err(e) => {
+                        if cli.json {
+                            print_error(true, "E_SESSION_STORE", &e, None);
+                        } else {
+                            eprintln!("Error: {}", e);
                         }
-                        Err(e) => {
-                            if cli.json {
-                                print_error(true, "E_SESSION_STORE", &e, None);
-                            } else {
-                                eprintln!("Error: {}", e);
+                        std::process::exit(1);
+                    }
+                },
+                AiSessionCommands::Show { id } => match agent::session_store::load_session(id) {
+                    Ok(Some(state)) => {
+                        if cli.json {
+                            println!("{}", serde_json::to_string_pretty(&state).unwrap());
+                        } else {
+                            println!("=== Session Transcript: {} ===", id);
+                            println!("Initial Question: {}\n", state.question);
+                            for msg in &state.messages {
+                                if msg.role == "system" {
+                                    continue;
+                                }
+                                let role_cap = match msg.role.as_str() {
+                                    "user" => "User".to_string(),
+                                    "assistant" => "Assistant".to_string(),
+                                    "tool" => "Tool".to_string(),
+                                    _ => msg.role.to_string(),
+                                };
+                                println!("\x1b[1m{}:\x1b[0m {}", role_cap, msg.content);
+                                if let Some(tool_calls) = &msg.tool_calls {
+                                    for tc in tool_calls {
+                                        println!("  └─ Tool Call: {}({})", tc.name, tc.arguments);
+                                    }
+                                }
+                                if let Some(tool_call_id) = &msg.tool_call_id {
+                                    println!("  └─ Tool Response ID: {}", tool_call_id);
+                                }
+                                println!();
                             }
-                            std::process::exit(1);
                         }
                     }
-                }
-            }
-        }
-        Commands::Ask { question, interactive, store_this_session, session } => {
+                    Ok(None) => {
+                        let err_msg = format!("Session ID '{}' not found.", id);
+                        if cli.json {
+                            print_error(true, "E_SESSION_NOT_FOUND", &err_msg, None);
+                        } else {
+                            eprintln!("Error: {}", err_msg);
+                        }
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        if cli.json {
+                            print_error(true, "E_SESSION_STORE", &e, None);
+                        } else {
+                            eprintln!("Error: {}", e);
+                        }
+                        std::process::exit(1);
+                    }
+                },
+            },
+        },
+        Commands::Ask {
+            question,
+            interactive,
+            store_this_session,
+            session,
+        } => {
             if let Err(e) = agent::check_ai_configuration_validity() {
                 if cli.json {
                     print_error(true, "E_INVALID_PARAMS", &e, None);
@@ -2545,25 +2879,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Some(Spinner::start("Agent is thinking...".to_string()))
             };
 
-            match agent::run_agent_query(question, *interactive, loaded_state).await {
+            match agent::run_agent_query(question, *interactive, cli.json, loaded_state).await {
                 Ok(result) => {
                     if let Some(s) = spinner.take() {
                         s.stop().await;
                     }
 
-                    let stopped_prematurely = result.round_count >= 6;
-                    let answer = result.final_answer.clone().unwrap_or_else(|| "No final answer could be generated.".to_string());
-                    
+                    let stopped_prematurely = result.round_count >= 12;
+                    let answer = result
+                        .final_answer
+                        .clone()
+                        .unwrap_or_else(|| "No final answer could be generated.".to_string());
+
                     let cfg = config_mgr::load_config();
                     let should_save = cfg.ai_chat_session_store || *store_this_session;
-                    
+
                     if should_save {
-                        let first_q = result.messages.iter()
+                        let first_q = result
+                            .messages
+                            .iter()
                             .find(|m| m.role == "user")
                             .map(|m| m.content.as_str())
                             .unwrap_or(question);
-                            
-                        if let Err(e) = agent::session_store::save_session(&active_session_id, first_q, &result) {
+
+                        if let Err(e) =
+                            agent::session_store::save_session(&active_session_id, first_q, &result)
+                        {
                             eprintln!("\nWarning: Failed to save session: {}", e);
                         }
                     }
@@ -2581,10 +2922,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         println!("{}", serde_json::to_string_pretty(&json_val).unwrap());
                     } else {
                         if stopped_prematurely {
-                            println!("\x1b[33m(Investigation stopped after 6 tool calls — this may be incomplete.)\x1b[0m\n");
+                            println!("\n\x1b[33m(Investigation stopped after 12 tool calls — this may be incomplete.)\x1b[0m\n");
                         }
-                        
-                        println!("{}", answer);
+
+                        termimad::print_text(&answer);
 
                         if !result.data_used.is_empty() {
                             println!("\n\x1b[1mData used:\x1b[0m");
@@ -2594,7 +2935,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         if should_save {
-                            println!("\n[Session ID: {} saved. Use --session {} to continue.]", active_session_id, active_session_id);
+                            println!(
+                                "\n[Session ID: {} saved. Use --session {} to continue.]",
+                                active_session_id, active_session_id
+                            );
                         }
                     }
                 }
@@ -2611,7 +2955,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-
     }
 
     Ok(())
@@ -2669,8 +3012,9 @@ async fn check_and_print_background_work(json_mode: bool, filter_path_or_vol: Op
                 if snap.state != DaemonState::Live {
                     let mut status_parts = Vec::new();
                     let mut any_scanning = false;
-                    
-                    let mut vols_sorted: Vec<(&String, &VolumeProgress)> = snap.volumes.iter().collect();
+
+                    let mut vols_sorted: Vec<(&String, &VolumeProgress)> =
+                        snap.volumes.iter().collect();
                     vols_sorted.sort_by(|a, b| a.0.cmp(b.0));
 
                     for (vol_name, vol_progress) in vols_sorted {
@@ -2902,7 +3246,7 @@ async fn run_uninstall(delete_snapshot: bool, yes: bool) -> Result<(), Box<dyn s
             if let Some(result) = resp.result {
                 if let Ok(snap) = serde_json::from_value::<ProgressSnapshot>(result) {
                     println!("[Cli] Daemon is running. Sending cleanup command to daemon...");
-                    
+
                     // Call the uninstall_cleanup JSON-RPC method.
                     let params = serde_json::json!({ "delete_snapshot": delete_snapshot });
                     if let Err(e) = query_rpc("uninstall_cleanup", params).await {
@@ -2988,7 +3332,9 @@ async fn run_uninstall(delete_snapshot: bool, yes: bool) -> Result<(), Box<dyn s
                     let _ = child.kill();
                 }
             } else {
-                eprintln!("  [WARNING] Failed to spawn temporary daemon. Cleaning config file only.");
+                eprintln!(
+                    "  [WARNING] Failed to spawn temporary daemon. Cleaning config file only."
+                );
                 let mut config_path = db_dir.clone();
                 config_path.push("config.toml");
                 if config_path.exists() {

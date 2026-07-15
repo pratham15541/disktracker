@@ -1,8 +1,8 @@
+use crate::history;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use storage;
-use crate::history;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopItem {
@@ -10,10 +10,10 @@ pub struct TopItem {
     pub volume: String,
     pub path: String, // relative path excluding volume
     pub is_directory: bool,
-    pub size: u64,           // Mode A
-    pub size_delta: i64,     // Mode B/C growth
-    pub churn: u64,          // Mode B/C churn
-    pub item_count: u64,     // rollup count
+    pub size: u64,       // Mode A
+    pub size_delta: i64, // Mode B/C growth
+    pub churn: u64,      // Mode B/C churn
+    pub item_count: u64, // rollup count
     pub file_id: u64,
 }
 
@@ -77,10 +77,22 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     while i < bytes.len() {
         let b0 = lookup[bytes[i] as usize];
         let b1 = lookup[bytes[i + 1] as usize];
-        let b2 = if bytes[i + 2] == b'=' { 0 } else { lookup[bytes[i + 2] as usize] };
-        let b3 = if bytes[i + 3] == b'=' { 0 } else { lookup[bytes[i + 3] as usize] };
+        let b2 = if bytes[i + 2] == b'=' {
+            0
+        } else {
+            lookup[bytes[i + 2] as usize]
+        };
+        let b3 = if bytes[i + 3] == b'=' {
+            0
+        } else {
+            lookup[bytes[i + 3] as usize]
+        };
 
-        if b0 == 255 || b1 == 255 || (bytes[i + 2] != b'=' && b2 == 255) || (bytes[i + 3] != b'=' && b3 == 255) {
+        if b0 == 255
+            || b1 == 255
+            || (bytes[i + 2] != b'=' && b2 == 255)
+            || (bytes[i + 3] != b'=' && b3 == 255)
+        {
             return None;
         }
 
@@ -97,18 +109,14 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(result)
 }
 
-fn is_descendant_u64(
-    parent_map: &HashMap<u64, u64>,
-    file_id: u64,
-    ancestor_id: u64,
-) -> bool {
+fn is_descendant_u64(parent_map: &HashMap<u64, u64>, file_id: u64, ancestor_id: u64) -> bool {
     if file_id == ancestor_id {
         return true;
     }
     let mut current_id = file_id;
     let mut visited = HashSet::new();
     visited.insert(current_id);
-    
+
     while current_id != 0 {
         if let Some(&p) = parent_map.get(&current_id) {
             if p == ancestor_id {
@@ -166,15 +174,30 @@ fn get_fact_path_local_u64(
 
 pub fn handle_get_top(params: Value) -> Result<Value, String> {
     let path_filter = params.get("path").and_then(|p| p.as_str());
-    let volume_filter = params.get("volume").and_then(|v| v.as_str()).map(|s| s.to_uppercase());
-    let folders = params.get("folders").and_then(|f| f.as_bool()).unwrap_or(false);
-    let files = params.get("files").and_then(|f| f.as_bool()).unwrap_or(false);
+    let volume_filter = params
+        .get("volume")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_uppercase());
+    let folders = params
+        .get("folders")
+        .and_then(|f| f.as_bool())
+        .unwrap_or(false);
+    let files = params
+        .get("files")
+        .and_then(|f| f.as_bool())
+        .unwrap_or(false);
     let limit = params.get("limit").and_then(|l| l.as_u64()).unwrap_or(20) as usize;
     let since = params.get("since").and_then(|s| s.as_i64());
     let between_a = params.get("between_a").and_then(|s| s.as_str());
     let between_b = params.get("between_b").and_then(|s| s.as_str());
-    let growth = params.get("growth").and_then(|g| g.as_bool()).unwrap_or(false);
-    let churn = params.get("churn").and_then(|c| c.as_bool()).unwrap_or(false);
+    let growth = params
+        .get("growth")
+        .and_then(|g| g.as_bool())
+        .unwrap_or(false);
+    let churn = params
+        .get("churn")
+        .and_then(|c| c.as_bool())
+        .unwrap_or(false);
     let cursor = params.get("cursor").and_then(|c| c.as_str());
 
     let conn = storage::get_db_connection().map_err(|e| e.to_string())?;
@@ -196,7 +219,9 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
         let (vol, fid) = history::resolve_path_to_id(&conn, path)?;
         if let Some(ref f_vol) = filter_volume {
             if f_vol != &vol {
-                return Err("E_INVALID_PARAMS: Path filter and volume filter do not match.".to_string());
+                return Err(
+                    "E_INVALID_PARAMS: Path filter and volume filter do not match.".to_string(),
+                );
             }
         }
         filter_volume = Some(vol);
@@ -217,13 +242,22 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
     let is_interval_mode = since.is_some() || between_a.is_some();
 
     if since.is_some() && (between_a.is_some() || between_b.is_some()) {
-        return Err("E_INVALID_PARAMS: Parameters '--since' and '--between' are mutually exclusive.".to_string());
+        return Err(
+            "E_INVALID_PARAMS: Parameters '--since' and '--between' are mutually exclusive."
+                .to_string(),
+        );
     }
     if growth && churn {
-        return Err("E_INVALID_PARAMS: Parameters '--growth' and '--churn' are mutually exclusive.".to_string());
+        return Err(
+            "E_INVALID_PARAMS: Parameters '--growth' and '--churn' are mutually exclusive."
+                .to_string(),
+        );
     }
     if folders && files {
-        return Err("E_INVALID_PARAMS: Parameters '--folders' and '--files' are mutually exclusive.".to_string());
+        return Err(
+            "E_INVALID_PARAMS: Parameters '--folders' and '--files' are mutually exclusive."
+                .to_string(),
+        );
     }
 
     let mut all_temp_items = Vec::new();
@@ -251,13 +285,15 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                     "SELECT file_id, parent_file_id, name FROM facts WHERE volume = ?1 AND is_directory = 1"
                 ).map_err(|e| e.to_string())?;
 
-                let dir_rows = stmt_dirs.query_map(rusqlite::params![vol], |row| {
-                    Ok((
-                        row.get::<_, u64>(0)?,
-                        row.get::<_, u64>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                }).map_err(|e| e.to_string())?;
+                let dir_rows = stmt_dirs
+                    .query_map(rusqlite::params![vol], |row| {
+                        Ok((
+                            row.get::<_, u64>(0)?,
+                            row.get::<_, u64>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(|e| e.to_string())?;
 
                 for r in dir_rows {
                     let (fid, parent_fid, name) = r.map_err(|e| e.to_string())?;
@@ -270,13 +306,15 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                     "SELECT file_id, parent_file_id, size FROM facts WHERE volume = ?1 AND is_directory = 0"
                 ).map_err(|e| e.to_string())?;
 
-                let file_rows = stmt_files.query_map(rusqlite::params![vol], |row| {
-                    Ok((
-                        row.get::<_, u64>(0)?,
-                        row.get::<_, u64>(1)?,
-                        row.get::<_, u64>(2)?,
-                    ))
-                }).map_err(|e| e.to_string())?;
+                let file_rows = stmt_files
+                    .query_map(rusqlite::params![vol], |row| {
+                        Ok((
+                            row.get::<_, u64>(0)?,
+                            row.get::<_, u64>(1)?,
+                            row.get::<_, u64>(2)?,
+                        ))
+                    })
+                    .map_err(|e| e.to_string())?;
 
                 for r in file_rows {
                     let (fid, parent_fid, size) = r.map_err(|e| e.to_string())?;
@@ -288,12 +326,11 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                     "SELECT file_id, parent_file_id FROM facts WHERE volume = ?1 AND is_directory = 1"
                 ).map_err(|e| e.to_string())?;
 
-                let dir_rows = stmt_dirs.query_map(rusqlite::params![vol], |row| {
-                    Ok((
-                        row.get::<_, u64>(0)?,
-                        row.get::<_, u64>(1)?,
-                    ))
-                }).map_err(|e| e.to_string())?;
+                let dir_rows = stmt_dirs
+                    .query_map(rusqlite::params![vol], |row| {
+                        Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?))
+                    })
+                    .map_err(|e| e.to_string())?;
 
                 for r in dir_rows {
                     let (fid, parent_fid) = r.map_err(|e| e.to_string())?;
@@ -304,14 +341,16 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                     "SELECT file_id, parent_file_id, name, size FROM facts WHERE volume = ?1 AND is_directory = 0"
                 ).map_err(|e| e.to_string())?;
 
-                let file_rows = stmt_files.query_map(rusqlite::params![vol], |row| {
-                    Ok((
-                        row.get::<_, u64>(0)?,
-                        row.get::<_, u64>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, u64>(3)?,
-                    ))
-                }).map_err(|e| e.to_string())?;
+                let file_rows = stmt_files
+                    .query_map(rusqlite::params![vol], |row| {
+                        Ok((
+                            row.get::<_, u64>(0)?,
+                            row.get::<_, u64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, u64>(3)?,
+                        ))
+                    })
+                    .map_err(|e| e.to_string())?;
 
                 for r in file_rows {
                     let (fid, parent_fid, name, size) = r.map_err(|e| e.to_string())?;
@@ -330,7 +369,10 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                     let mut visited = HashSet::new();
                     visited.insert(file_id);
 
-                    while current_parent != 0 && current_parent != file_id && visited.insert(current_parent) {
+                    while current_parent != 0
+                        && current_parent != file_id
+                        && visited.insert(current_parent)
+                    {
                         if parent_map.contains_key(&current_parent) {
                             *folder_sizes.entry(current_parent).or_insert(0) += size;
                             *folder_item_counts.entry(current_parent).or_insert(0) += 1;
@@ -394,7 +436,8 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
         }
 
         all_temp_items.sort_by(|a, b| {
-            b.size.cmp(&a.size)
+            b.size
+                .cmp(&a.size)
                 .then_with(|| a.name.cmp(&b.name))
                 .then_with(|| b.file_id.cmp(&a.file_id))
         });
@@ -405,7 +448,7 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
         if let Some(since_ts) = since {
             let now = chrono::Utc::now();
             let needed_secs = (now.timestamp() - since_ts) as f64;
-            
+
             let mut check_vols = Vec::new();
             if let Some(ref vol) = filter_volume {
                 check_vols.push(vol.clone());
@@ -425,7 +468,8 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
 
                 let available_secs = if let Some(ref at_str) = min_at_str {
                     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(at_str) {
-                        now.signed_duration_since(dt.with_timezone(&chrono::Utc)).num_seconds() as f64
+                        now.signed_duration_since(dt.with_timezone(&chrono::Utc))
+                            .num_seconds() as f64
                     } else {
                         0.0
                     }
@@ -439,8 +483,7 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                 if days_available < days_needed {
                     return Err(format!(
                         "E_INSUFFICIENT_HISTORY:{:.4}:{:.4}",
-                        days_available,
-                        days_needed
+                        days_available, days_needed
                     ));
                 }
             }
@@ -459,17 +502,19 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                     |row| row.get(0),
                 ).unwrap_or(0);
 
-                let seq_end: i64 = conn.query_row(
-                    "SELECT COALESCE(MAX(sequence), 0) FROM mutation_log WHERE volume = ?1",
-                    rusqlite::params![vol],
-                    |row| row.get(0),
-                ).unwrap_or(0);
+                let seq_end: i64 = conn
+                    .query_row(
+                        "SELECT COALESCE(MAX(sequence), 0) FROM mutation_log WHERE volume = ?1",
+                        rusqlite::params![vol],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
 
                 volume_intervals.push((vol.clone(), seq_start, seq_end));
             }
         } else if let Some(b_a) = between_a {
             let b_b = between_b.ok_or("Missing parameter between_b")?;
-            
+
             let parent_a = storage::get_parent_snapshot_by_label_or_id(b_a)
                 .map_err(|e| e.to_string())?
                 .ok_or_else(|| format!("E_NOT_FOUND: Snapshot not found: {}", b_a))?;
@@ -493,20 +538,42 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
             };
 
             for vol in comp_vols {
-                let seq_a = parent_a.volumes.iter().find(|v| v.volume == vol)
+                let seq_a = parent_a
+                    .volumes
+                    .iter()
+                    .find(|v| v.volume == vol)
                     .map(|v| v.sequence_number)
-                    .ok_or_else(|| format!("E_NOT_FOUND: Volume {} not found in snapshot {}", vol, parent_a.label))?;
-                let seq_b = parent_b.volumes.iter().find(|v| v.volume == vol)
+                    .ok_or_else(|| {
+                        format!(
+                            "E_NOT_FOUND: Volume {} not found in snapshot {}",
+                            vol, parent_a.label
+                        )
+                    })?;
+                let seq_b = parent_b
+                    .volumes
+                    .iter()
+                    .find(|v| v.volume == vol)
                     .map(|v| v.sequence_number)
-                    .ok_or_else(|| format!("E_NOT_FOUND: Volume {} not found in snapshot {}", vol, parent_b.label))?;
-                
-                let (start, end) = if seq_a <= seq_b { (seq_a, seq_b) } else { (seq_b, seq_a) };
-                
-                let min_seq: i64 = conn.query_row(
-                    "SELECT COALESCE(MIN(sequence), 0) FROM mutation_log WHERE volume = ?1",
-                    rusqlite::params![vol],
-                    |row| row.get(0),
-                ).unwrap_or(0);
+                    .ok_or_else(|| {
+                        format!(
+                            "E_NOT_FOUND: Volume {} not found in snapshot {}",
+                            vol, parent_b.label
+                        )
+                    })?;
+
+                let (start, end) = if seq_a <= seq_b {
+                    (seq_a, seq_b)
+                } else {
+                    (seq_b, seq_a)
+                };
+
+                let min_seq: i64 = conn
+                    .query_row(
+                        "SELECT COALESCE(MIN(sequence), 0) FROM mutation_log WHERE volume = ?1",
+                        rusqlite::params![vol],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(0);
 
                 if start < min_seq && min_seq > 1 {
                     let config = config_mgr::load_config();
@@ -529,14 +596,16 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                 "SELECT file_id, parent_file_id, name, is_directory FROM facts WHERE volume = ?1"
             ).map_err(|e| e.to_string())?;
 
-            let rows = stmt.query_map(rusqlite::params![vol], |row| {
-                Ok((
-                    row.get::<_, u64>(0)?,
-                    row.get::<_, u64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i32>(3)? != 0,
-                ))
-            }).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(rusqlite::params![vol], |row| {
+                    Ok((
+                        row.get::<_, u64>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i32>(3)? != 0,
+                    ))
+                })
+                .map_err(|e| e.to_string())?;
 
             for r in rows {
                 let (fid, parent_fid, name, is_dir) = r.map_err(|e| e.to_string())?;
@@ -549,16 +618,17 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
             let mut direct_churn = HashMap::new();
 
             if let Some(&(_, start_seq, end_seq)) = volume_intervals.iter().find(|i| &i.0 == vol) {
-                let mut mut_stmt = conn.prepare(
-                    "SELECT file_id, parent_file_id, name, kind, is_directory, size_delta 
+                let mut mut_stmt = conn
+                    .prepare(
+                        "SELECT file_id, parent_file_id, name, kind, is_directory, size_delta 
                      FROM mutation_log 
                      WHERE volume = ?1 AND sequence > ?2 AND sequence <= ?3
-                     ORDER BY sequence ASC"
-                ).map_err(|e| e.to_string())?;
+                     ORDER BY sequence ASC",
+                    )
+                    .map_err(|e| e.to_string())?;
 
-                let mut_rows = mut_stmt.query_map(
-                    rusqlite::params![vol, start_seq, end_seq],
-                    |row| {
+                let mut_rows = mut_stmt
+                    .query_map(rusqlite::params![vol, start_seq, end_seq], |row| {
                         Ok((
                             row.get::<_, u64>(0)?,
                             row.get::<_, u64>(1)?,
@@ -567,11 +637,12 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                             row.get::<_, i32>(4)? != 0,
                             row.get::<_, i64>(5)?,
                         ))
-                    }
-                ).map_err(|e| e.to_string())?;
+                    })
+                    .map_err(|e| e.to_string())?;
 
                 for r in mut_rows {
-                    let (fid, parent_fid, name, _kind, is_dir, size_delta) = r.map_err(|e| e.to_string())?;
+                    let (fid, parent_fid, name, _kind, is_dir, size_delta) =
+                        r.map_err(|e| e.to_string())?;
                     *direct_growth.entry(fid).or_insert(0) += size_delta;
                     *direct_churn.entry(fid).or_insert(0) += 1;
 
@@ -593,7 +664,10 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                     let mut visited = HashSet::new();
                     visited.insert(file_id);
 
-                    while current_parent != 0 && current_parent != file_id && visited.insert(current_parent) {
+                    while current_parent != 0
+                        && current_parent != file_id
+                        && visited.insert(current_parent)
+                    {
                         *rolled_growth.entry(current_parent).or_insert(0) += growth_val;
                         *rolled_churn.entry(current_parent).or_insert(0) += churn_val;
                         *rolled_item_count.entry(current_parent).or_insert(0) += 1;
@@ -605,7 +679,9 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                 for (&fid, &is_dir) in &is_dir_map {
                     if is_dir {
                         if let Some(ancestor_id) = filter_path_fid {
-                            if fid == ancestor_id || !is_descendant_u64(&parent_map, fid, ancestor_id) {
+                            if fid == ancestor_id
+                                || !is_descendant_u64(&parent_map, fid, ancestor_id)
+                            {
                                 continue;
                             }
                         }
@@ -638,7 +714,9 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                 for (&fid, &is_dir) in &is_dir_map {
                     if !is_dir {
                         if let Some(ancestor_id) = filter_path_fid {
-                            if fid == ancestor_id || !is_descendant_u64(&parent_map, fid, ancestor_id) {
+                            if fid == ancestor_id
+                                || !is_descendant_u64(&parent_map, fid, ancestor_id)
+                            {
                                 continue;
                             }
                         }
@@ -673,13 +751,16 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
 
         if churn {
             all_temp_items.sort_by(|a, b| {
-                b.churn.cmp(&a.churn)
+                b.churn
+                    .cmp(&a.churn)
                     .then_with(|| a.name.cmp(&b.name))
                     .then_with(|| b.file_id.cmp(&a.file_id))
             });
         } else {
             all_temp_items.sort_by(|a, b| {
-                b.size_delta.abs().cmp(&a.size_delta.abs())
+                b.size_delta
+                    .abs()
+                    .cmp(&a.size_delta.abs())
                     .then_with(|| a.name.cmp(&b.name))
                     .then_with(|| b.file_id.cmp(&a.file_id))
             });
@@ -703,7 +784,9 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
         }
     }
 
-    let cursor_exists = if let (Some(c_val), Some(ref c_vol), Some(c_fid)) = (cursor_val, &cursor_volume, cursor_file_id) {
+    let cursor_exists = if let (Some(c_val), Some(ref c_vol), Some(c_fid)) =
+        (cursor_val, &cursor_volume, cursor_file_id)
+    {
         all_temp_items.iter().any(|item| {
             let item_val = if !is_interval_mode {
                 item.size as i64
@@ -780,7 +863,8 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
     for item in &mut page_items {
         if let Some(parent_map) = volume_parent_maps.get(&item.volume) {
             if let Some(name_map) = volume_name_maps.get(&item.volume) {
-                item.path = get_fact_path_local_u64(parent_map, name_map, &item.volume, item.file_id);
+                item.path =
+                    get_fact_path_local_u64(parent_map, name_map, &item.volume, item.file_id);
             }
         }
     }
@@ -872,7 +956,8 @@ mod tests {
                 PRIMARY KEY (volume, file_id)
             )",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "CREATE TABLE mutation_log (
                 sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -887,7 +972,8 @@ mod tests {
                 source TEXT NOT NULL
             )",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn
     }
 
@@ -929,16 +1015,18 @@ mod tests {
 
         let query_str = "SELECT volume, file_id, parent_file_id, name, is_directory, size FROM facts WHERE volume = 'C:'".to_string();
         let mut stmt = conn.prepare(&query_str).unwrap();
-        let rows = stmt.query_map([], |row| {
-            Ok(FactNode {
-                volume: row.get(0)?,
-                file_id: row.get(1)?,
-                parent_file_id: row.get(2)?,
-                name: row.get(3)?,
-                is_directory: row.get::<_, i32>(4)? != 0,
-                size: row.get(5)?,
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(FactNode {
+                    volume: row.get(0)?,
+                    file_id: row.get(1)?,
+                    parent_file_id: row.get(2)?,
+                    name: row.get(3)?,
+                    is_directory: row.get::<_, i32>(4)? != 0,
+                    size: row.get(5)?,
+                })
             })
-        }).unwrap();
+            .unwrap();
 
         let mut nodes = HashMap::new();
         let mut parent_map = HashMap::new();
@@ -990,7 +1078,10 @@ mod tests {
                 let mut visited = HashSet::new();
                 visited.insert(*file_id);
 
-                while current_parent != 0 && current_parent != *file_id && visited.insert(current_parent) {
+                while current_parent != 0
+                    && current_parent != *file_id
+                    && visited.insert(current_parent)
+                {
                     let parent_key = (volume.to_string(), current_parent);
                     if parent_map.contains_key(&parent_key) {
                         *folder_sizes.entry(parent_key.clone()).or_insert(0) += size;
@@ -1006,8 +1097,12 @@ mod tests {
         let mut folder_items = Vec::new();
         for ((volume, file_id), node) in &nodes {
             if node.is_directory {
-                let size = *folder_sizes.get(&(volume.to_string(), *file_id)).unwrap_or(&0);
-                let item_count = *folder_item_counts.get(&(volume.to_string(), *file_id)).unwrap_or(&0);
+                let size = *folder_sizes
+                    .get(&(volume.to_string(), *file_id))
+                    .unwrap_or(&0);
+                let item_count = *folder_item_counts
+                    .get(&(volume.to_string(), *file_id))
+                    .unwrap_or(&0);
                 let rel_path = get_fact_path_local(&parent_map, &name_map, volume, *file_id);
                 folder_items.push(TopItem {
                     name: node.name.clone(),
@@ -1053,9 +1148,12 @@ mod tests {
     #[test]
     fn test_handle_get_top_inner_filtering() {
         let mut temp_home = std::env::temp_dir();
-        temp_home.push(format!("disktracker_test_top_{}", chrono::Utc::now().timestamp_micros()));
+        temp_home.push(format!(
+            "disktracker_test_top_{}",
+            chrono::Utc::now().timestamp_micros()
+        ));
         std::fs::create_dir_all(&temp_home).unwrap();
-        
+
         let old_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &temp_home);
 
@@ -1074,7 +1172,8 @@ mod tests {
                 PRIMARY KEY (volume, file_id)
             )",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         // Populate mock facts:
         // C: (1, parent 1)

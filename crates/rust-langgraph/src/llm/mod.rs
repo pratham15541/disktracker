@@ -1,7 +1,7 @@
 //! LLM integration traits and provider adapters.
 
 use crate::errors::Result;
-use crate::state::Message;
+use crate::state::{Message, ToolCall};
 use async_trait::async_trait;
 use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
@@ -61,6 +61,9 @@ pub struct MessageChunk {
 
     /// Optional finish reason
     pub finish_reason: Option<String>,
+
+    /// Optional tool calls delta/result
+    pub tool_calls: Option<Vec<ToolCall>>,
 }
 
 /// Trait for chat model implementations.
@@ -112,6 +115,7 @@ pub trait ChatModel: Send + Sync {
             content: message.content,
             is_final: true,
             finish_reason: Some("stop".to_string()),
+            tool_calls: message.tool_calls,
         };
 
         Ok(Box::pin(futures::stream::once(async move { Ok(chunk) })))

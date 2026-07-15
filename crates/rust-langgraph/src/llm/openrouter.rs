@@ -10,7 +10,7 @@
 //! set by this adapter yet; the API works without them.
 
 use crate::errors::{Error, Result};
-use crate::llm::{ChatModel, ToolInfo};
+use crate::llm::{ChatModel, ToolInfo, MessageChunk};
 use crate::state::{Message, ToolCall};
 use async_openai::{
     config::OpenAIConfig,
@@ -256,6 +256,145 @@ impl ChatModel for OpenRouterAdapter {
             .map_err(|e| Error::execution(format!("OpenRouter API error: {}", e)))?;
 
         Self::from_openai_response(response)
+    }
+
+    async fn stream(
+        &self,
+        messages: &[Message],
+    ) -> Result<std::pin::Pin<Box<dyn futures::Stream<Item = Result<MessageChunk>> + Send>>> {
+        let openai_messages: Vec<_> = messages.iter().map(Self::to_openai_message).collect();
+
+        let mut request = CreateChatCompletionRequestArgs::default();
+        request.model(&self.model);
+        request.messages(openai_messages);
+        request.stream(true);
+
+        if let Some(temp) = self.temperature {
+            request.temperature(temp);
+        }
+
+        if !self.bound_tools.is_empty() {
+            let tools: Vec<_> = self.bound_tools.iter().map(Self::to_openai_tool).collect();
+            request.tools(tools);
+        }
+
+        let request = request
+            .build()
+            .map_err(|e| Error::execution(format!("Failed to build OpenRouter request: {}", e)))?;
+
+        let stream = self
+            .client
+            .chat()
+            .create_stream(request)
+            .await
+            .map_err(|e| Error::execution(format!("OpenRouter API error: {}", e)))?;
+
+        struct StreamState<S> {
+            stream: S,
+            accumulated_tools: Vec<AccumulatedToolCall>,
+        }
+
+        #[derive(Clone)]
+        struct AccumulatedToolCall {
+            id: String,
+            name: String,
+            arguments: String,
+        }
+
+        let stream_state = StreamState {
+            stream,
+            accumulated_tools: Vec::new(),
+        };
+
+        use futures::StreamExt;
+        let mapped = futures::stream::unfold(stream_state, |mut state| async move {
+            match state.stream.next().await {
+                Some(Ok(response)) => {
+                    let choice = response.choices.first();
+                    let chunk_text = choice
+                        .and_then(|c| c.delta.content.clone())
+                        .unwrap_or_default();
+                    let is_final = choice
+                        .and_then(|c| c.finish_reason.clone())
+                        .is_some();
+                    let finish_reason = choice
+                        .and_then(|c| c.finish_reason.as_ref().map(|r| format!("{:?}", r)));
+
+                    if let Some(choice) = choice {
+                        if let Some(ref calls) = choice.delta.tool_calls {
+                            for tc in calls {
+                                let idx = tc.index as usize;
+                                while state.accumulated_tools.len() <= idx {
+                                    state.accumulated_tools.push(AccumulatedToolCall {
+                                        id: String::new(),
+                                        name: String::new(),
+                                        arguments: String::new(),
+                                    });
+                                }
+                                if let Some(ref id) = tc.id {
+                                    state.accumulated_tools[idx].id.push_str(id);
+                                }
+                                if let Some(ref f) = tc.function {
+                                    if let Some(ref name) = f.name {
+                                        state.accumulated_tools[idx].name.push_str(name);
+                                    }
+                                    if let Some(ref args) = f.arguments {
+                                        state.accumulated_tools[idx].arguments.push_str(args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    let tool_calls = if is_final && !state.accumulated_tools.is_empty() {
+                        let parsed: Vec<ToolCall> = state.accumulated_tools
+                            .iter()
+                            .map(|acc| {
+                                let args = serde_json::from_str(&acc.arguments)
+                                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                                ToolCall::new(acc.id.clone(), acc.name.clone(), args)
+                            })
+                            .collect();
+                        Some(parsed)
+                    } else {
+                        None
+                    };
+
+                    let chunk = MessageChunk {
+                        content: chunk_text,
+                        is_final,
+                        finish_reason,
+                        tool_calls,
+                    };
+                    Some((Ok(chunk), state))
+                }
+                Some(Err(e)) => Some((Err(Error::execution(format!("Stream error: {}", e))), state)),
+                None => {
+                    if !state.accumulated_tools.is_empty() {
+                        let parsed: Vec<ToolCall> = state.accumulated_tools
+                            .iter()
+                            .map(|acc| {
+                                let args = serde_json::from_str(&acc.arguments)
+                                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                                ToolCall::new(acc.id.clone(), acc.name.clone(), args)
+                            })
+                            .collect();
+                        state.accumulated_tools.clear();
+                        let chunk = MessageChunk {
+                            content: String::new(),
+                            is_final: true,
+                            finish_reason: Some("stop".to_string()),
+                            tool_calls: Some(parsed),
+                        };
+                        Some((Ok(chunk), state))
+                    } else {
+                        None
+                    }
+                }
+            }
+        });
+
+        Ok(Box::pin(mapped))
     }
 
     fn name(&self) -> &str {

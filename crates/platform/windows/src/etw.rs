@@ -2,11 +2,7 @@ use std::thread;
 use std::time::Duration;
 
 #[cfg(windows)]
-use ferrisetw::{
-    parser::Parser,
-    provider::Provider,
-    trace::UserTrace,
-};
+use ferrisetw::{parser::Parser, provider::Provider, trace::UserTrace};
 #[cfg(windows)]
 use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
@@ -185,7 +181,9 @@ fn run_windows_etw() -> Result<(), String> {
                                         && !proc_lower.contains("firefox.exe")
                                         && !proc_lower.contains("msedge.exe")
                                     {
-                                        let _ = storage::insert_app_runtime_artifact(&proc_name, &file_name);
+                                        let _ = storage::insert_app_runtime_artifact(
+                                            &proc_name, &file_name,
+                                        );
                                     }
                                 }
                             }
@@ -213,7 +211,7 @@ fn run_windows_etw() -> Result<(), String> {
 fn get_process_name_by_pid(pid: u32) -> Option<String> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
     unsafe {
@@ -253,7 +251,7 @@ pub fn start_etw_engine() {
 fn prepopulate_mock_telemetry_data() {
     let _ = storage::insert_app_install_footprint(
         "Hollow Knight",
-        "C:/Program Files (x86)/Steam/steamapps/common/Hollow Knight/hollow_knight.exe"
+        "C:/Program Files (x86)/Steam/steamapps/common/Hollow Knight/hollow_knight.exe",
     );
     let _ = storage::insert_app_install_footprint(
         "Hollow Knight",
@@ -261,30 +259,30 @@ fn prepopulate_mock_telemetry_data() {
     );
     let _ = storage::insert_app_install_footprint(
         "Hollow Knight",
-        "C:/Program Files (x86)/Steam/steamapps/common/Hollow Knight/hollow_knight_Data/level0"
+        "C:/Program Files (x86)/Steam/steamapps/common/Hollow Knight/hollow_knight_Data/level0",
     );
 
     let _ = storage::insert_app_runtime_artifact(
         "hollow_knight.exe",
-        "C:/Users/you/AppData/LocalLow/Team Cherry/Hollow Knight/user1.dat"
+        "C:/Users/you/AppData/LocalLow/Team Cherry/Hollow Knight/user1.dat",
     );
     let _ = storage::insert_app_runtime_artifact(
         "hollow_knight.exe",
-        "C:/Users/you/AppData/LocalLow/Team Cherry/Hollow Knight/Player.log"
+        "C:/Users/you/AppData/LocalLow/Team Cherry/Hollow Knight/Player.log",
     );
 
     let _ = storage::insert_app_install_footprint(
         "Epic Games Launcher",
-        "C:/Program Files (x86)/Epic Games/Launcher/Portal/Binaries/Win64/EpicGamesLauncher.exe"
+        "C:/Program Files (x86)/Epic Games/Launcher/Portal/Binaries/Win64/EpicGamesLauncher.exe",
     );
 
     let _ = storage::insert_app_runtime_artifact(
         "EpicGamesLauncher.exe",
-        "C:/Users/you/AppData/Local/EpicGamesLauncher/Saved/Config/Windows/GameUserSettings.ini"
+        "C:/Users/you/AppData/Local/EpicGamesLauncher/Saved/Config/Windows/GameUserSettings.ini",
     );
     let _ = storage::insert_app_runtime_artifact(
         "EpicGamesLauncher.exe",
-        "C:/Users/you/AppData/Local/UnrealEngine/Common/DerivedDataCache"
+        "C:/Users/you/AppData/Local/UnrealEngine/Common/DerivedDataCache",
     );
     println!("[ETW Mock] Pre-populated database with mock app telemetry data.");
 }

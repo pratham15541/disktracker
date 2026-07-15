@@ -1,6 +1,6 @@
+use crate::graph::AskState;
 use rusqlite::{params, Connection};
 use std::path::PathBuf;
-use crate::graph::AskState;
 
 fn get_sessions_db_path() -> Result<PathBuf, String> {
     let mut dir = storage::get_db_dir().map_err(|e| e.to_string())?;
@@ -24,7 +24,11 @@ fn get_conn() -> Result<Connection, String> {
     Ok(conn)
 }
 
-pub fn save_session(session_id: &str, first_question: &str, state: &AskState) -> Result<(), String> {
+pub fn save_session(
+    session_id: &str,
+    first_question: &str,
+    state: &AskState,
+) -> Result<(), String> {
     let conn = get_conn()?;
     let state_json = serde_json::to_string(state).map_err(|e| e.to_string())?;
     let created_at = chrono::Utc::now().to_rfc3339();
@@ -64,7 +68,9 @@ pub fn load_session(session_id: &str) -> Result<Option<AskState>, String> {
 pub fn list_sessions() -> Result<Vec<(String, String, String)>, String> {
     let conn = get_conn()?;
     let mut stmt = conn
-        .prepare("SELECT session_id, created_at, first_question FROM sessions ORDER BY created_at DESC")
+        .prepare(
+            "SELECT session_id, created_at, first_question FROM sessions ORDER BY created_at DESC",
+        )
         .map_err(|e| e.to_string())?;
 
     let rows = stmt
@@ -104,13 +110,15 @@ mod tests {
                 state_json TEXT NOT NULL
             )",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         let state = AskState {
             question: "test question".to_string(),
             messages: vec![],
             round_count: 1,
             interactive: false,
+            json: false,
             data_used: vec![],
             final_answer: None,
         };
@@ -119,14 +127,24 @@ mod tests {
         conn.execute(
             "INSERT OR REPLACE INTO sessions (session_id, first_question, created_at, state_json)
              VALUES (?1, ?2, ?3, ?4)",
-            params!["session_123", "test question", "2026-07-14T12:00:00Z", state_json],
-        ).unwrap();
+            params![
+                "session_123",
+                "test question",
+                "2026-07-14T12:00:00Z",
+                state_json
+            ],
+        )
+        .unwrap();
 
-        let mut stmt = conn.prepare("SELECT state_json FROM sessions WHERE session_id = ?1").unwrap();
-        let mut rows = stmt.query_map(params!["session_123"], |row| {
-            let val: String = row.get(0)?;
-            Ok(val)
-        }).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT state_json FROM sessions WHERE session_id = ?1")
+            .unwrap();
+        let mut rows = stmt
+            .query_map(params!["session_123"], |row| {
+                let val: String = row.get(0)?;
+                Ok(val)
+            })
+            .unwrap();
 
         let row = rows.next().unwrap().unwrap();
         let loaded: AskState = serde_json::from_str(&row).unwrap();

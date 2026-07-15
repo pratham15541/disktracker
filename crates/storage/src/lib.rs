@@ -61,7 +61,9 @@ pub fn get_readonly_db_connection() -> std::result::Result<Connection, Box<dyn E
 }
 
 /// Executes a query on the read-only connection and returns results as an array of JSON objects.
-pub fn execute_readonly_query(query: &str) -> std::result::Result<serde_json::Value, Box<dyn Error>> {
+pub fn execute_readonly_query(
+    query: &str,
+) -> std::result::Result<serde_json::Value, Box<dyn Error>> {
     let conn = get_readonly_db_connection()?;
     let mut stmt = conn.prepare(query)?;
     let col_count = stmt.column_count();
@@ -76,7 +78,9 @@ pub fn execute_readonly_query(query: &str) -> std::result::Result<serde_json::Va
             let val = row.get_ref(i)?;
             let json_val = match val {
                 rusqlite::types::ValueRef::Null => serde_json::Value::Null,
-                rusqlite::types::ValueRef::Integer(n) => serde_json::Value::Number(serde_json::Number::from(n)),
+                rusqlite::types::ValueRef::Integer(n) => {
+                    serde_json::Value::Number(serde_json::Number::from(n))
+                }
                 rusqlite::types::ValueRef::Real(r) => {
                     if let Some(num) = serde_json::Number::from_f64(r) {
                         serde_json::Value::Number(num)
@@ -593,9 +597,11 @@ pub fn save_signatures(sigs: &serde_json::Value) -> std::result::Result<(), Box<
     Ok(())
 }
 
-pub fn find_footprint_association(path_str: &str) -> std::result::Result<Option<(String, String)>, Box<dyn Error>> {
+pub fn find_footprint_association(
+    path_str: &str,
+) -> std::result::Result<Option<(String, String)>, Box<dyn Error>> {
     let conn = get_db_connection()?;
-    
+
     // Check install footprints
     let mut stmt = conn.prepare("SELECT app_name FROM app_install_footprints WHERE file_path = ?1 OR ?1 LIKE file_path || '%' LIMIT 1")?;
     let mut rows = stmt.query([path_str])?;
@@ -603,7 +609,7 @@ pub fn find_footprint_association(path_str: &str) -> std::result::Result<Option<
         let app_name: String = row.get(0)?;
         return Ok(Some((app_name, "install".to_string())));
     }
-    
+
     // Check runtime footprints
     let mut stmt2 = conn.prepare("SELECT process_name FROM app_runtime_artifacts WHERE file_path = ?1 OR ?1 LIKE file_path || '%' LIMIT 1")?;
     let mut rows2 = stmt2.query([path_str])?;
@@ -611,9 +617,6 @@ pub fn find_footprint_association(path_str: &str) -> std::result::Result<Option<
         let proc_name: String = row.get(0)?;
         return Ok(Some((proc_name, "runtime".to_string())));
     }
-    
+
     Ok(None)
 }
-
-
-

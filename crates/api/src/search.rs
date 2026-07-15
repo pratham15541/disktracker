@@ -5,7 +5,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use tantivy::query::{AllQuery, BooleanQuery, FuzzyTermQuery, Occur, Query, RangeQuery, RegexQuery, TermQuery};
+use tantivy::query::{
+    AllQuery, BooleanQuery, FuzzyTermQuery, Occur, Query, RangeQuery, RegexQuery, TermQuery,
+};
 use tantivy::schema::IndexRecordOption;
 use tantivy::schema::*;
 use tantivy::tokenizer::NgramTokenizer;

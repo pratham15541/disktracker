@@ -1,9 +1,9 @@
-use rust_langgraph::prelude::*;
+use crate::{check_ai_configuration_validity, query_daemon_rpc};
 use rust_langgraph::llm::openrouter::OpenRouterAdapter;
 use rust_langgraph::llm::ChatModel;
 use rust_langgraph::llm::ToolInfo;
+use rust_langgraph::prelude::*;
 use serde::{Deserialize, Serialize};
-use crate::{check_ai_configuration_validity, query_daemon_rpc};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AskState {
@@ -11,6 +11,7 @@ pub struct AskState {
     pub messages: Vec<Message>,
     pub round_count: u32,
     pub interactive: bool,
+    pub json: bool,
     pub data_used: Vec<String>,
     pub final_answer: Option<String>,
 }
@@ -21,10 +22,16 @@ impl State for AskState {
             self.question = other.question;
         }
         if !other.messages.is_empty() {
-            self.messages.extend(other.messages);
+            if other.messages.len() > self.messages.len() {
+                self.messages = other.messages;
+            } else if other.messages.len() == self.messages.len() && other.messages != self.messages
+            {
+                self.messages = other.messages;
+            }
         }
         self.round_count = other.round_count;
         self.interactive = other.interactive;
+        self.json = other.json;
         for entry in other.data_used {
             if !self.data_used.contains(&entry) {
                 self.data_used.push(entry);
@@ -402,16 +409,49 @@ pub fn get_tools() -> Vec<ToolInfo> {
                 },
                 "required": ["label"]
             })
+        ),
+        ToolInfo::new(
+            "disktracker_websearch",
+            "Searches the web for information about an application's publisher, creator, default installation directories, registry keys, and runtime folders.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query (e.g. 'valorant publisher', 'valorant installation folder layout')."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max number of search results to return (default 5)."
+                    }
+                },
+                "required": ["query"]
+            })
+        ),
+        ToolInfo::new(
+            "disktracker_human_feedback",
+            "Asks the user a clarifying question or requests additional input during interactive mode, returning the user's feedback to the agent.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "The question or message to present to the user."
+                    }
+                },
+                "required": ["prompt"]
+            })
         )
     ]
 }
 
-pub fn build_agent_graph() -> std::result::Result<CompiledGraph<AskState>, rust_langgraph::errors::Error> {
+pub fn build_agent_graph(
+) -> std::result::Result<CompiledGraph<AskState>, rust_langgraph::errors::Error> {
     let mut graph = StateGraph::new();
 
     // 1. Planner Node
     graph.add_node("planner", |mut state: AskState, _config: &Config| async move {
-        if state.round_count >= 6 {
+        if state.round_count >= 12 {
             return Ok(state);
         }
 
@@ -424,7 +464,7 @@ pub fn build_agent_graph() -> std::result::Result<CompiledGraph<AskState>, rust_
         let os = std::env::consts::OS;
 
         let system_prompt = format!(
-            "You are Antigravity, a natural-language orchestration agent for DiskTracker.\n\
+            "You are AI AGENT, a natural-language orchestration agent for DiskTracker.\n\
              You analyze application file installations and runtime footprints to help users clean up their disks safely.\n\
              \n\
              DATABASE SCHEMA:\n\
@@ -440,11 +480,13 @@ pub fn build_agent_graph() -> std::result::Result<CompiledGraph<AskState>, rust_
              INSTRUCTIONS:\n\
              1. Query high-level DiskTracker tools (e.g. disktracker_search, disktracker_top, disktracker_history, disktracker_status, disktracker_doctor, disktracker_snapshot_list, disktracker_snapshot_diff) first as they are highly optimized and correct. Check existing database data using `disktracker_search` first to see if details are already indexed before deciding to take a new snapshot.\n\
              2. Be extremely dynamic and persistent in your search strategy: If searching for a specific application name directly yields no results or incomplete data, do not stop. You must dynamically expand your search to identify and query associated publisher names, parent/creator directories, or related executable names (for example, files might be stored under parent publisher folders or run under different process names). Use `fetch_signature` to resolve these name associations, and dynamically fallback to query the raw database tables (`app_install_footprints`, `app_runtime_artifacts`) via `sqlite_read_query` if the high-level search index returns nothing.\n\
-             3. If you decide to execute a shell command (via cli_read_command or cli_write_command), you MUST explicitly state in your text response which shell you are executing the command in (e.g. 'Executing command in PowerShell:' or 'Executing command in Bash:') *before* making the tool call. Do not ask the user which shell they are using; you must use the shell specified in the Shell Mode dynamically provided to you.\n\
-             4. Under Action Mode (interactive), you can suggest file deletions (cli_write_command) or snapshot operations (disktracker_snapshot_create, disktracker_snapshot_delete).\n\
-             5. If you need to execute a mutating action (like creating or deleting a snapshot or deleting a file) to proceed or answer a question, do NOT ask the user for permission in text. Instead, directly invoke the corresponding mutating tool (e.g., `disktracker_snapshot_create`, `disktracker_snapshot_delete`, or `cli_write_command`). The environment will automatically present a `[y/N]` approval prompt to the user at the command line. If you are not in interactive mode, the tool call will be rejected with an error, at which point you should inform the user to run with the `--interactive` flag.\n\
-             6. Perform multi-step reasoning and tool calls if necessary. Do not hesitate to call multiple tools in sequence (up to 5 rounds) to gather all necessary facts before formulating your final answer.\n\
-             7. Terminate and produce your final natural language answer as soon as you have the answer. DO NOT query in infinite loops.",
+             3. Use the `disktracker_websearch` tool to search the internet for external knowledge about applications, such as identifying who the publisher or creator of a game/app is, what their default installation folders are, or what process names they run under. This allows you to find associated directories and footprints to check in the database.\n\
+             4. If you decide to execute a shell command (via cli_read_command or cli_write_command), you MUST explicitly state in your text response which shell you are executing the command in (e.g. 'Executing command in PowerShell:' or 'Executing command in Bash:') *before* making the tool call. Do not ask the user which shell they are using; you must use the shell specified in the Shell Mode dynamically provided to you.\n\
+             5. Under Action Mode (interactive), you can suggest file deletions (cli_write_command) or snapshot operations (disktracker_snapshot_create, disktracker_snapshot_delete).\n\
+             6. You do NOT have permission to execute mutating actions directly (such as creating/deleting snapshots or deleting files using `disktracker_snapshot_create`, `disktracker_snapshot_delete`, or `cli_write_command`). If a mutating action is required, you must never invoke these mutating tools. Instead, output a clear natural language message instructing the human to perform the work (e.g. telling them to run the command or delete the files manually).\n\
+             7. Perform multi-step reasoning and tool calls if necessary. Do not hesitate to call multiple tools in sequence, try different tools or directions if one fails, reloop or go back-and-forth in any direction as needed (up to 10 rounds) to gather all necessary facts before formulating your final answer.\n\
+             8. In interactive mode, if you are unsure of the user's intent, need clarification, or want to ask a question before proceeding, do NOT output the question in text. Instead, immediately invoke the `disktracker_human_feedback` tool with your question. It will display the question to the user and return their input directly to you so you can continue reasoning.\n\
+             9. Terminate and produce your final natural language answer as soon as you have the answer. DO NOT query in infinite loops.",
             shell,
             os
         );
@@ -455,10 +497,53 @@ pub fn build_agent_graph() -> std::result::Result<CompiledGraph<AskState>, rust_
         let adapter = OpenRouterAdapter::with_api_base(&model_name, &api_key, &base_url)
             .bind_tools(get_tools());
 
-        match adapter.invoke(&request_messages).await {
-            Ok(reply) => {
+        let mut attempts = 0;
+        let max_attempts = 3;
+        let mut delay = std::time::Duration::from_millis(500);
+        let stream_res = loop {
+            match adapter.stream(&request_messages).await {
+                Ok(s) => break Ok(s),
+                Err(e) => {
+                    attempts += 1;
+                    if attempts >= max_attempts {
+                        break Err(e);
+                    }
+                    if !state.json {
+                        println!("\n\x1b[33m⚠️  [Warning] OpenRouter request failed ({:?}). Retrying in {:?}... ({}/{})\x1b[0m", e, delay, attempts, max_attempts);
+                    }
+                    tokio::time::sleep(delay).await;
+                    delay *= 2;
+                }
+            }
+        };
+
+        match stream_res {
+            Ok(mut stream) => {
+                use futures::StreamExt;
+                let mut full_content = String::new();
+                let mut final_tool_calls = Vec::new();
+                while let Some(chunk_res) = stream.next().await {
+                    match chunk_res {
+                        Ok(chunk) => {
+                            if !chunk.content.is_empty() {
+                                full_content.push_str(&chunk.content);
+                            }
+                            if let Some(mut tc) = chunk.tool_calls {
+                                final_tool_calls.append(&mut tc);
+                            }
+                        }
+                        Err(e) => return Err(rust_langgraph::errors::Error::execution(format!("Stream error: {}", e))),
+                    }
+                }
+
+                let mut reply = Message::assistant(full_content);
+                if !final_tool_calls.is_empty() {
+                    reply = reply.with_tool_calls(final_tool_calls);
+                }
                 state.messages.push(reply.clone());
-                if reply.tool_calls.is_none() || reply.tool_calls.as_ref().unwrap().is_empty() {
+
+                let has_no_tool_calls = reply.tool_calls.as_ref().map(|tc| tc.is_empty()).unwrap_or(true);
+                if has_no_tool_calls {
                     state.final_answer = Some(reply.content);
                 }
                 Ok(state)
@@ -470,7 +555,7 @@ pub fn build_agent_graph() -> std::result::Result<CompiledGraph<AskState>, rust_
     // 2. Read-only Tool Execution Node
     graph.add_node("tool_exec", |mut state: AskState, _config: &Config| async move {
         state.round_count += 1;
-        
+
         let last_msg = match state.messages.last().cloned() {
             Some(m) => m,
             None => return Ok(state),
@@ -555,7 +640,7 @@ pub fn build_agent_graph() -> std::result::Result<CompiledGraph<AskState>, rust_
                         let modified_after_ts = tc.arguments.get("modified_after")
                             .and_then(|m| m.as_str())
                             .and_then(|s| parse_time_param(s).ok());
-                        
+
                         let modified_before_ts = tc.arguments.get("modified_before")
                             .and_then(|m| m.as_str())
                             .and_then(|s| parse_time_param(s).ok());
@@ -608,7 +693,7 @@ pub fn build_agent_graph() -> std::result::Result<CompiledGraph<AskState>, rust_
 
                         let since_ts = since.and_then(|s| parse_time_param(s).ok());
                         let until_ts = until.and_then(|u| parse_time_param(u).ok());
-                        
+
                         let resolved_path = resolve_absolute_path(path);
 
                         let history_params = serde_json::json!({
@@ -647,7 +732,7 @@ pub fn build_agent_graph() -> std::result::Result<CompiledGraph<AskState>, rust_
 
                         let since_ts = since.and_then(|s| parse_time_param(s).ok());
                         let resolved_path = path.map(|p| resolve_absolute_path(p));
-                        
+
                         let mut resolved_vol = volume.map(|v| {
                             if v.len() == 1 {
                                 format!("{}:", v.to_ascii_uppercase())
@@ -737,6 +822,156 @@ pub fn build_agent_graph() -> std::result::Result<CompiledGraph<AskState>, rust_
                             Err(e) => {
                                 state.messages.push(Message::tool(format!("Error: {}", e), tool_call_id));
                             }
+                        }
+                    }
+                    "disktracker_websearch" => {
+                        let query = tc.arguments["query"].as_str().unwrap_or("");
+                        let limit = tc.arguments.get("limit").and_then(|l| l.as_u64()).unwrap_or(5) as usize;
+
+                        state.data_used.push(format!("disktracker_websearch(query={:?})", query));
+
+                        let cfg = config_mgr::load_config();
+                        let provider = cfg.ai_websearch_provider.as_deref().unwrap_or("duckduckgo").to_lowercase();
+                        let api_key = crate::get_websearch_api_key().unwrap_or_default();
+
+                        let mut results = Vec::new();
+                        let client = reqwest::Client::new();
+
+                        if provider == "tavily" && !api_key.is_empty() {
+                            let url = "https://api.tavily.com/search";
+                            let payload = serde_json::json!({
+                                "api_key": api_key,
+                                "query": query,
+                                "max_results": limit,
+                            });
+                            if let Ok(resp) = client.post(url).json(&payload).send().await {
+                                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                    if let Some(arr) = json.get("results").and_then(|r| r.as_array()) {
+                                        for (idx, item) in arr.iter().enumerate() {
+                                            let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                                            let url = item.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
+                                            let snippet = item.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+                                            results.push(websearch::types::SearchResult {
+                                                title,
+                                                snippet,
+                                                url,
+                                                ref_index: idx + 1,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        } else if provider == "google" && !api_key.is_empty() && cfg.ai_websearch_cx.is_some() {
+                            if let Some(ref cx) = cfg.ai_websearch_cx {
+                                let url = format!(
+                                    "https://www.googleapis.com/customsearch/v1?q={}&key={}&cx={}&num={}",
+                                    urlencoding::encode(query),
+                                    urlencoding::encode(&api_key),
+                                    urlencoding::encode(cx),
+                                    limit
+                                );
+                                if let Ok(resp) = client.get(&url).send().await {
+                                    if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                        if let Some(arr) = json.get("items").and_then(|i| i.as_array()) {
+                                            for (idx, item) in arr.iter().enumerate() {
+                                                let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                                                let url = item.get("link").and_then(|l| l.as_str()).unwrap_or("").to_string();
+                                                let snippet = item.get("snippet").and_then(|s| s.as_str()).unwrap_or("").to_string();
+                                                results.push(websearch::types::SearchResult {
+                                                    title,
+                                                    snippet,
+                                                    url,
+                                                    ref_index: idx + 1,
+                                                });
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else if provider == "brave" && !api_key.is_empty() {
+                            let url = format!(
+                                "https://api.search.brave.com/res/v1/web/search?q={}&count={}",
+                                urlencoding::encode(query),
+                                limit
+                            );
+                            if let Ok(resp) = client.get(&url)
+                                .header("Accept", "application/json")
+                                .header("X-Subscription-Token", &api_key)
+                                .send()
+                                .await
+                            {
+                                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                                    if let Some(arr) = json.get("web").and_then(|w| w.get("results")).and_then(|r| r.as_array()) {
+                                        for (idx, item) in arr.iter().enumerate() {
+                                            let title = item.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                                            let url = item.get("url").and_then(|u| u.as_str()).unwrap_or("").to_string();
+                                            let snippet = item.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
+                                            results.push(websearch::types::SearchResult {
+                                                title,
+                                                snippet,
+                                                url,
+                                                ref_index: idx + 1,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if results.is_empty() {
+                            let opts = websearch::types::SearchOptions {
+                                query: query.to_string(),
+                                max_results: Some(limit),
+                                ..Default::default()
+                            };
+                            match websearch::run_search(opts).await {
+                                Ok(out) => {
+                                    state.messages.push(Message::tool(serde_json::to_string(&out).unwrap_or_default(), tool_call_id));
+                                }
+                                Err(e) => {
+                                    state.messages.push(Message::tool(format!("Error: {}", e), tool_call_id));
+                                }
+                            }
+                        } else {
+                            let references = websearch::build_refs(&results);
+                            let body = websearch::format_results(&results);
+                            let refs_block = websearch::render_references(&references);
+                            let full = if refs_block.is_empty() {
+                                body
+                            } else {
+                                format!("{}\n\n{}", body, refs_block)
+                            };
+
+                            let output = websearch::types::SearchOutput {
+                                query: query.to_string(),
+                                token_estimate: websearch::compress::estimate_tokens(&full),
+                                result_count: results.len(),
+                                references,
+                                results,
+                            };
+                            state.messages.push(Message::tool(serde_json::to_string(&output).unwrap_or_default(), tool_call_id));
+                        }
+                    }
+                    "disktracker_human_feedback" => {
+                        let prompt = tc.arguments["prompt"].as_str().unwrap_or("");
+                        state.data_used.push(format!("disktracker_human_feedback(prompt={:?})", prompt));
+
+                        if !state.interactive {
+                            state.messages.push(Message::tool(
+                                "Error: Cannot request human feedback in exploratory (read-only) mode. Please run with the --interactive flag to enable human interaction.".to_string(),
+                                tool_call_id
+                            ));
+                        } else {
+                            println!("\n\x1b[32m💬 [Agent Question] {}\x1b[0m", prompt);
+                            print!("Your Response: ");
+                            use std::io::Write;
+                            let _ = std::io::stdout().flush();
+
+                            let mut input = String::new();
+                            let _ = std::io::stdin().read_line(&mut input);
+                            let user_feedback = input.trim().to_string();
+
+                            state.messages.push(Message::tool(user_feedback, tool_call_id));
                         }
                     }
                     _ => {}
@@ -923,7 +1158,7 @@ pub fn build_agent_graph() -> std::result::Result<CompiledGraph<AskState>, rust_
         let interactive = state.interactive;
 
         async move {
-            if round_count >= 6 {
+            if round_count >= 12 {
                 return Ok(rust_langgraph::pregel::BranchResult::end());
             }
 
@@ -932,19 +1167,23 @@ pub fn build_agent_graph() -> std::result::Result<CompiledGraph<AskState>, rust_
                     if !calls.is_empty() {
                         let mut has_mutating = false;
                         for tc in calls {
-                            if tc.name == "cli_write_command" 
+                            if tc.name == "cli_write_command"
                                 || tc.name == "snapshot_manage"
                                 || tc.name == "disktracker_snapshot_create"
-                                || tc.name == "disktracker_snapshot_delete" 
+                                || tc.name == "disktracker_snapshot_delete"
                             {
                                 has_mutating = true;
                             }
                         }
                         if has_mutating {
                             if interactive {
-                                return Ok(rust_langgraph::pregel::BranchResult::single("human_interrupt"));
+                                return Ok(rust_langgraph::pregel::BranchResult::single(
+                                    "human_interrupt",
+                                ));
                             } else {
-                                return Ok(rust_langgraph::pregel::BranchResult::single("tool_reject_non_interactive"));
+                                return Ok(rust_langgraph::pregel::BranchResult::single(
+                                    "tool_reject_non_interactive",
+                                ));
                             }
                         } else {
                             return Ok(rust_langgraph::pregel::BranchResult::single("tool_exec"));
@@ -973,7 +1212,7 @@ mod tests {
     #[test]
     fn test_tools_definition() {
         let tools = get_tools();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 16);
         assert_eq!(tools[0].name, "sqlite_read_query");
         assert_eq!(tools[1].name, "fetch_signature");
         assert_eq!(tools[2].name, "cli_read_command");
@@ -988,6 +1227,8 @@ mod tests {
         assert_eq!(tools[11].name, "disktracker_snapshot_diff");
         assert_eq!(tools[12].name, "disktracker_snapshot_create");
         assert_eq!(tools[13].name, "disktracker_snapshot_delete");
+        assert_eq!(tools[14].name, "disktracker_websearch");
+        assert_eq!(tools[15].name, "disktracker_human_feedback");
     }
 
     #[test]
@@ -996,4 +1237,3 @@ mod tests {
         assert!(app.is_ok());
     }
 }
-

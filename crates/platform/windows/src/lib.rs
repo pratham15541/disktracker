@@ -1162,9 +1162,12 @@ pub fn relaunch_as_admin(extra_args: &[&str]) -> std::io::Result<()> {
     }
 
     let exe = std::env::current_exe()?;
-    let exe_str = exe
-        .to_str()
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "exe path is not valid UTF-8"))?;
+    let exe_str = exe.to_str().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "exe path is not valid UTF-8",
+        )
+    })?;
 
     let verb = wide("runas");
     let file = wide(exe_str);
@@ -1173,11 +1176,15 @@ pub fn relaunch_as_admin(extra_args: &[&str]) -> std::io::Result<()> {
 
     let result = unsafe {
         ShellExecuteW(
-            0,                                    // hwnd
+            0, // hwnd
             verb.as_ptr(),
             file.as_ptr(),
-            if params_str.is_empty() { std::ptr::null() } else { params.as_ptr() },
-            std::ptr::null(),                     // lpDirectory (inherit)
+            if params_str.is_empty() {
+                std::ptr::null()
+            } else {
+                params.as_ptr()
+            },
+            std::ptr::null(), // lpDirectory (inherit)
             SW_SHOWNORMAL as i32,
         )
     };

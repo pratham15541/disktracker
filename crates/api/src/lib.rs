@@ -1,6 +1,6 @@
 mod drain;
-pub mod search;
 pub mod history;
+pub mod search;
 pub mod snapshots;
 pub mod top;
 use tantivy::schema::Value;
@@ -433,8 +433,18 @@ fn get_volume_progress(volume: &str, state: DaemonState) -> VolumeProgress {
 #[link(name = "version")]
 extern "system" {
     fn GetFileVersionInfoSizeW(lptstrfilename: *const u16, lpdwhandle: *mut u32) -> u32;
-    fn GetFileVersionInfoW(lptstrfilename: *const u16, dwhandle: u32, dwlen: u32, lpdata: *mut std::ffi::c_void) -> i32;
-    fn VerQueryValueW(pblock: *const std::ffi::c_void, lpsubblock: *const u16, lplpbuffer: *mut *mut std::ffi::c_void, puLen: *mut u32) -> i32;
+    fn GetFileVersionInfoW(
+        lptstrfilename: *const u16,
+        dwhandle: u32,
+        dwlen: u32,
+        lpdata: *mut std::ffi::c_void,
+    ) -> i32;
+    fn VerQueryValueW(
+        pblock: *const std::ffi::c_void,
+        lpsubblock: *const u16,
+        lplpbuffer: *mut *mut std::ffi::c_void,
+        puLen: *mut u32,
+    ) -> i32;
 }
 
 #[cfg(windows)]
@@ -452,7 +462,8 @@ fn get_pe_metadata(path: &str) -> Option<(String, String)> {
     }
 
     let mut data = vec![0u8; size as usize];
-    let success = unsafe { GetFileVersionInfoW(path_w.as_ptr(), 0, size, data.as_mut_ptr() as *mut _) };
+    let success =
+        unsafe { GetFileVersionInfoW(path_w.as_ptr(), 0, size, data.as_mut_ptr() as *mut _) };
     if success == 0 {
         return None;
     }
@@ -469,7 +480,14 @@ fn get_pe_metadata(path: &str) -> Option<(String, String)> {
     let mut lang_code = "040904b0".to_string();
 
     unsafe {
-        if VerQueryValueW(data.as_ptr() as *const _, trans_subblock.as_ptr(), &mut lp_buffer, &mut len) != 0 && len >= 4 {
+        if VerQueryValueW(
+            data.as_ptr() as *const _,
+            trans_subblock.as_ptr(),
+            &mut lp_buffer,
+            &mut len,
+        ) != 0
+            && len >= 4
+        {
             let translation = lp_buffer as *const u16;
             let lang = *translation;
             let codepage = *translation.add(1);
@@ -477,27 +495,53 @@ fn get_pe_metadata(path: &str) -> Option<(String, String)> {
         }
     }
 
-    let company_subblock: Vec<u16> = std::ffi::OsStr::new(&format!(r"\StringFileInfo\{}\CompanyName", lang_code))
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let company_subblock: Vec<u16> =
+        std::ffi::OsStr::new(&format!(r"\StringFileInfo\{}\CompanyName", lang_code))
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
     unsafe {
-        if VerQueryValueW(data.as_ptr() as *const _, company_subblock.as_ptr(), &mut lp_buffer, &mut len) != 0 && len > 0 {
+        if VerQueryValueW(
+            data.as_ptr() as *const _,
+            company_subblock.as_ptr(),
+            &mut lp_buffer,
+            &mut len,
+        ) != 0
+            && len > 0
+        {
             let buffer_slice = std::slice::from_raw_parts(lp_buffer as *const u16, len as usize);
-            let actual_len = buffer_slice.iter().position(|&c| c == 0).unwrap_or(buffer_slice.len());
-            company = String::from_utf16_lossy(&buffer_slice[..actual_len]).trim().to_string();
+            let actual_len = buffer_slice
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(buffer_slice.len());
+            company = String::from_utf16_lossy(&buffer_slice[..actual_len])
+                .trim()
+                .to_string();
         }
     }
 
-    let product_subblock: Vec<u16> = std::ffi::OsStr::new(&format!(r"\StringFileInfo\{}\ProductName", lang_code))
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
+    let product_subblock: Vec<u16> =
+        std::ffi::OsStr::new(&format!(r"\StringFileInfo\{}\ProductName", lang_code))
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
     unsafe {
-        if VerQueryValueW(data.as_ptr() as *const _, product_subblock.as_ptr(), &mut lp_buffer, &mut len) != 0 && len > 0 {
+        if VerQueryValueW(
+            data.as_ptr() as *const _,
+            product_subblock.as_ptr(),
+            &mut lp_buffer,
+            &mut len,
+        ) != 0
+            && len > 0
+        {
             let buffer_slice = std::slice::from_raw_parts(lp_buffer as *const u16, len as usize);
-            let actual_len = buffer_slice.iter().position(|&c| c == 0).unwrap_or(buffer_slice.len());
-            product = String::from_utf16_lossy(&buffer_slice[..actual_len]).trim().to_string();
+            let actual_len = buffer_slice
+                .iter()
+                .position(|&c| c == 0)
+                .unwrap_or(buffer_slice.len());
+            product = String::from_utf16_lossy(&buffer_slice[..actual_len])
+                .trim()
+                .to_string();
         }
     }
 
@@ -556,12 +600,19 @@ fn is_command_safe_read_only(cmd: &str) -> Result<(), String> {
     let forbidden = [";", "&", "|", ">", "<", "$(", "`"];
     for char_str in forbidden {
         if cmd.contains(char_str) {
-            return Err(format!("Command contains forbidden character/redirection: '{}'", char_str));
+            return Err(format!(
+                "Command contains forbidden character/redirection: '{}'",
+                char_str
+            ));
         }
     }
 
     let cmd_trimmed = cmd.trim();
-    let first_word = cmd_trimmed.split_whitespace().next().unwrap_or("").to_lowercase();
+    let first_word = cmd_trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
 
     let whitelist = match storage::load_whitelist() {
         Ok(serde_json::Value::Object(map)) => {
@@ -574,7 +625,7 @@ fn is_command_safe_read_only(cmd: &str) -> Result<(), String> {
                 Vec::new()
             }
         }
-        _ => Vec::new()
+        _ => Vec::new(),
     };
 
     if !whitelist.contains(&first_word) {
@@ -613,12 +664,19 @@ fn is_command_safe_write(cmd: &str) -> Result<(), String> {
     let forbidden = [";", "&", "|", ">", "<", "$(", "`"];
     for char_str in forbidden {
         if cmd.contains(char_str) {
-            return Err(format!("Command contains forbidden character/redirection: '{}'", char_str));
+            return Err(format!(
+                "Command contains forbidden character/redirection: '{}'",
+                char_str
+            ));
         }
     }
 
     let cmd_trimmed = cmd.trim();
-    let first_word = cmd_trimmed.split_whitespace().next().unwrap_or("").to_lowercase();
+    let first_word = cmd_trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
 
     let whitelist = match storage::load_whitelist() {
         Ok(serde_json::Value::Object(map)) => {
@@ -631,7 +689,7 @@ fn is_command_safe_write(cmd: &str) -> Result<(), String> {
                 Vec::new()
             }
         }
-        _ => Vec::new()
+        _ => Vec::new(),
     };
 
     if !whitelist.contains(&first_word) {
@@ -721,7 +779,12 @@ async fn handle_request(
         }
         "config_get" => {
             let key = req.params.get("key").and_then(|k| k.as_str()).unwrap_or("");
-            if key != "retention" && key != "retention-days" && key != "fuzzy" && key != "auto-snapshot" && key != "auto-snapshot-interval" {
+            if key != "retention"
+                && key != "retention-days"
+                && key != "fuzzy"
+                && key != "auto-snapshot"
+                && key != "auto-snapshot-interval"
+            {
                 return JsonRpcResponse::error(
                     req.id,
                     -32602,
@@ -733,7 +796,7 @@ async fn handle_request(
                 "fuzzy" => config.fuzzy.to_string(),
                 "auto-snapshot" => config.auto_snapshot.to_string(),
                 "auto-snapshot-interval" => config.auto_snapshot_interval.clone(),
-                _ => config.retention.clone()
+                _ => config.retention.clone(),
             };
             let res = serde_json::json!({
                 "key": key,
@@ -748,7 +811,12 @@ async fn handle_request(
                 .get("value")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            if key != "retention" && key != "retention-days" && key != "fuzzy" && key != "auto-snapshot" && key != "auto-snapshot-interval" {
+            if key != "retention"
+                && key != "retention-days"
+                && key != "fuzzy"
+                && key != "auto-snapshot"
+                && key != "auto-snapshot-interval"
+            {
                 return JsonRpcResponse::error(
                     req.id,
                     -32602,
@@ -764,7 +832,8 @@ async fn handle_request(
                         return JsonRpcResponse::error(
                             req.id,
                             -32602,
-                            "Invalid boolean value. Acceptable values: true, false, on, off".to_string(),
+                            "Invalid boolean value. Acceptable values: true, false, on, off"
+                                .to_string(),
                         );
                     }
                 };
@@ -794,7 +863,8 @@ async fn handle_request(
                         return JsonRpcResponse::error(
                             req.id,
                             -32602,
-                            "Invalid boolean value. Acceptable values: true, false, on, off".to_string(),
+                            "Invalid boolean value. Acceptable values: true, false, on, off"
+                                .to_string(),
                         );
                     }
                 };
@@ -914,33 +984,44 @@ async fn handle_request(
                         "Path is required".to_string(),
                         Some(serde_json::json!({
                             "code": "E_INVALID_PARAMS"
-                        }))
+                        })),
                     );
                 }
             };
             let since = req.params.get("since").and_then(|t| t.as_i64());
             let until = req.params.get("until").and_then(|t| t.as_i64());
             let kind = req.params.get("kind").and_then(|k| k.as_str());
-            let collapse = req.params.get("collapse").and_then(|c| c.as_bool()).unwrap_or(false);
-            let limit = req.params.get("limit").and_then(|l| l.as_u64()).unwrap_or(100) as usize;
+            let collapse = req
+                .params
+                .get("collapse")
+                .and_then(|c| c.as_bool())
+                .unwrap_or(false);
+            let limit = req
+                .params
+                .get("limit")
+                .and_then(|l| l.as_u64())
+                .unwrap_or(100) as usize;
             let cursor = req.params.get("cursor").and_then(|c| c.as_str());
 
             match storage::get_db_connection() {
                 Ok(conn) => {
-                    match history::get_history(&conn, path, since, until, kind, collapse, limit, cursor) {
-                        Ok(resp) => {
-                            JsonRpcResponse::success(req.id, serde_json::json!(resp))
-                        }
+                    match history::get_history(
+                        &conn, path, since, until, kind, collapse, limit, cursor,
+                    ) {
+                        Ok(resp) => JsonRpcResponse::success(req.id, serde_json::json!(resp)),
                         Err(e) => {
                             if e.contains("not found") || e.contains("component") {
                                 JsonRpcResponse::error_with_data(
                                     req.id,
                                     -32002,
-                                    format!("Couldn't find \"{}\". Check the path and try again.", path),
+                                    format!(
+                                        "Couldn't find \"{}\". Check the path and try again.",
+                                        path
+                                    ),
                                     Some(serde_json::json!({
                                         "code": "E_NOT_FOUND",
                                         "input": path
-                                    }))
+                                    })),
                                 )
                             } else {
                                 JsonRpcResponse::error(req.id, -32603, e)
@@ -954,7 +1035,7 @@ async fn handle_request(
                     format!("Failed to connect to database: {}", e),
                 ),
             }
-        },
+        }
         "search_query" => {
             if search::REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst) {
                 let progress =
@@ -1100,21 +1181,11 @@ async fn handle_request(
                 Err(e) => JsonRpcResponse::error(req.id, -32603, e),
             }
         }
-        "snapshot_create" => {
-            map_rpc_result(req.id, snapshots::handle_snapshot_create(req.params))
-        }
-        "job.completed" => {
-            map_rpc_result(req.id, snapshots::handle_job_completed(req.params))
-        }
-        "snapshot_list" => {
-            map_rpc_result(req.id, snapshots::handle_snapshot_list(req.params))
-        }
-        "snapshot_diff" => {
-            map_rpc_result(req.id, snapshots::handle_snapshot_diff(req.params))
-        }
-        "get_top" => {
-            map_rpc_result(req.id, top::handle_get_top(req.params))
-        }
+        "snapshot_create" => map_rpc_result(req.id, snapshots::handle_snapshot_create(req.params)),
+        "job.completed" => map_rpc_result(req.id, snapshots::handle_job_completed(req.params)),
+        "snapshot_list" => map_rpc_result(req.id, snapshots::handle_snapshot_list(req.params)),
+        "snapshot_diff" => map_rpc_result(req.id, snapshots::handle_snapshot_diff(req.params)),
+        "get_top" => map_rpc_result(req.id, top::handle_get_top(req.params)),
         "get_search_rebuild_status" => {
             let in_progress = search::REBUILD_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst);
             let progress = search::REBUILD_PROGRESS_COUNT.load(std::sync::atomic::Ordering::SeqCst);
@@ -1127,7 +1198,11 @@ async fn handle_request(
             )
         }
         "uninstall_cleanup" => {
-            let delete_snapshot = req.params.get("delete_snapshot").and_then(|v| v.as_bool()).unwrap_or(false);
+            let delete_snapshot = req
+                .params
+                .get("delete_snapshot")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
 
             if let Ok(db_dir) = storage::get_db_dir() {
                 let mut config_path = db_dir.clone();
@@ -1161,50 +1236,102 @@ async fn handle_request(
             JsonRpcResponse::success(req.id, serde_json::json!({ "status": "ok" }))
         }
         "sqlite_read_query" => {
-            let query = req.params.get("query").and_then(|q| q.as_str()).unwrap_or("");
+            let query = req
+                .params
+                .get("query")
+                .and_then(|q| q.as_str())
+                .unwrap_or("");
             if query.is_empty() {
-                return JsonRpcResponse::error(req.id, -32602, "Query parameter is required".to_string());
+                return JsonRpcResponse::error(
+                    req.id,
+                    -32602,
+                    "Query parameter is required".to_string(),
+                );
             }
             match storage::execute_readonly_query(query) {
                 Ok(val) => JsonRpcResponse::success(req.id, val),
-                Err(e) => JsonRpcResponse::error(req.id, -32603, format!("Database query error: {}", e)),
+                Err(e) => {
+                    JsonRpcResponse::error(req.id, -32603, format!("Database query error: {}", e))
+                }
             }
         }
         "fetch_signature" => {
-            let target = req.params.get("target").and_then(|t| t.as_str()).unwrap_or("");
+            let target = req
+                .params
+                .get("target")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
             let sig = resolve_signature(target);
             JsonRpcResponse::success(req.id, serde_json::json!({ "signature": sig }))
         }
         "cli_read_command" => {
-            let command = req.params.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            let command = req
+                .params
+                .get("command")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
             if command.is_empty() {
-                return JsonRpcResponse::error(req.id, -32602, "Command parameter is required".to_string());
+                return JsonRpcResponse::error(
+                    req.id,
+                    -32602,
+                    "Command parameter is required".to_string(),
+                );
             }
             match execute_read_only_command(command) {
-                Ok(output) => JsonRpcResponse::success(req.id, serde_json::json!({ "output": output })),
+                Ok(output) => {
+                    JsonRpcResponse::success(req.id, serde_json::json!({ "output": output }))
+                }
                 Err(e) => JsonRpcResponse::error(req.id, -32603, e),
             }
         }
         "cli_write_command" => {
-            let command = req.params.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            let command = req
+                .params
+                .get("command")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
             if command.is_empty() {
-                return JsonRpcResponse::error(req.id, -32602, "Command parameter is required".to_string());
+                return JsonRpcResponse::error(
+                    req.id,
+                    -32602,
+                    "Command parameter is required".to_string(),
+                );
             }
             match execute_write_command(command) {
-                Ok(output) => JsonRpcResponse::success(req.id, serde_json::json!({ "output": output })),
+                Ok(output) => {
+                    JsonRpcResponse::success(req.id, serde_json::json!({ "output": output }))
+                }
                 Err(e) => JsonRpcResponse::error(req.id, -32603, e),
             }
         }
         "snapshot_manage" => {
-            let action = req.params.get("action").and_then(|a| a.as_str()).unwrap_or("");
-            let label = req.params.get("label").and_then(|l| l.as_str()).unwrap_or("");
+            let action = req
+                .params
+                .get("action")
+                .and_then(|a| a.as_str())
+                .unwrap_or("");
+            let label = req
+                .params
+                .get("label")
+                .and_then(|l| l.as_str())
+                .unwrap_or("");
             if action.is_empty() || label.is_empty() {
-                return JsonRpcResponse::error(req.id, -32602, "Action and label parameters are required".to_string());
+                return JsonRpcResponse::error(
+                    req.id,
+                    -32602,
+                    "Action and label parameters are required".to_string(),
+                );
             }
             match action {
                 "delete" => match storage::delete_snapshot_db(label) {
-                    Ok(_) => JsonRpcResponse::success(req.id, serde_json::json!({ "status": "deleted" })),
-                    Err(e) => JsonRpcResponse::error(req.id, -32603, format!("Failed to delete snapshot: {}", e)),
+                    Ok(_) => {
+                        JsonRpcResponse::success(req.id, serde_json::json!({ "status": "deleted" }))
+                    }
+                    Err(e) => JsonRpcResponse::error(
+                        req.id,
+                        -32603,
+                        format!("Failed to delete snapshot: {}", e),
+                    ),
                 },
                 "compress" => {
                     if let Ok(conn) = storage::get_db_connection() {
@@ -1212,30 +1339,62 @@ async fn handle_request(
                     }
                     JsonRpcResponse::success(req.id, serde_json::json!({ "status": "compressed" }))
                 }
-                _ => JsonRpcResponse::error(req.id, -32602, format!("Unknown snapshot action: {}", action)),
+                _ => JsonRpcResponse::error(
+                    req.id,
+                    -32602,
+                    format!("Unknown snapshot action: {}", action),
+                ),
             }
         }
         "whitelist_add" => {
-            let mode = req.params.get("mode").and_then(|m| m.as_str()).unwrap_or("");
-            let command = req.params.get("command").and_then(|c| c.as_str()).unwrap_or("");
+            let mode = req
+                .params
+                .get("mode")
+                .and_then(|m| m.as_str())
+                .unwrap_or("");
+            let command = req
+                .params
+                .get("command")
+                .and_then(|c| c.as_str())
+                .unwrap_or("");
             if mode != "read" && mode != "write" {
-                return JsonRpcResponse::error(req.id, -32602, "Invalid mode (must be 'read' or 'write')".to_string());
+                return JsonRpcResponse::error(
+                    req.id,
+                    -32602,
+                    "Invalid mode (must be 'read' or 'write')".to_string(),
+                );
             }
             if command.is_empty() {
-                return JsonRpcResponse::error(req.id, -32602, "Command name is required".to_string());
+                return JsonRpcResponse::error(
+                    req.id,
+                    -32602,
+                    "Command name is required".to_string(),
+                );
             }
             let mut whitelist = match storage::load_whitelist() {
                 Ok(val) => val,
-                Err(e) => return JsonRpcResponse::error(req.id, -32603, format!("Failed to load whitelist: {}", e)),
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32603,
+                        format!("Failed to load whitelist: {}", e),
+                    )
+                }
             };
             if let Some(map) = whitelist.as_object_mut() {
                 if let Some(serde_json::Value::Array(arr)) = map.get_mut(mode) {
                     let cmd_lower = command.to_lowercase();
-                    let already_exists = arr.iter().any(|v| v.as_str().map(|s| s.to_lowercase()) == Some(cmd_lower.clone()));
+                    let already_exists = arr
+                        .iter()
+                        .any(|v| v.as_str().map(|s| s.to_lowercase()) == Some(cmd_lower.clone()));
                     if !already_exists {
                         arr.push(serde_json::json!(command));
                         if let Err(e) = storage::save_whitelist(&whitelist) {
-                            return JsonRpcResponse::error(req.id, -32603, format!("Failed to save whitelist: {}", e));
+                            return JsonRpcResponse::error(
+                                req.id,
+                                -32603,
+                                format!("Failed to save whitelist: {}", e),
+                            );
                         }
                     }
                 }
@@ -1243,19 +1402,41 @@ async fn handle_request(
             JsonRpcResponse::success(req.id, serde_json::json!({ "status": "ok" }))
         }
         "signature_add" => {
-            let target = req.params.get("target").and_then(|t| t.as_str()).unwrap_or("");
-            let description = req.params.get("description").and_then(|d| d.as_str()).unwrap_or("");
+            let target = req
+                .params
+                .get("target")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            let description = req
+                .params
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or("");
             if target.is_empty() || description.is_empty() {
-                return JsonRpcResponse::error(req.id, -32602, "Target and description parameters are required".to_string());
+                return JsonRpcResponse::error(
+                    req.id,
+                    -32602,
+                    "Target and description parameters are required".to_string(),
+                );
             }
             let mut sigs = match storage::load_signatures() {
                 Ok(val) => val,
-                Err(e) => return JsonRpcResponse::error(req.id, -32603, format!("Failed to load signatures: {}", e)),
+                Err(e) => {
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32603,
+                        format!("Failed to load signatures: {}", e),
+                    )
+                }
             };
             if let Some(map) = sigs.as_object_mut() {
                 map.insert(target.to_string(), serde_json::json!(description));
                 if let Err(e) = storage::save_signatures(&sigs) {
-                    return JsonRpcResponse::error(req.id, -32603, format!("Failed to save signatures: {}", e));
+                    return JsonRpcResponse::error(
+                        req.id,
+                        -32603,
+                        format!("Failed to save signatures: {}", e),
+                    );
                 }
             }
             JsonRpcResponse::success(req.id, serde_json::json!({ "status": "ok" }))
@@ -1277,7 +1458,10 @@ fn get_last_successful_pruning_time() -> Option<chrono::DateTime<chrono::Utc>> {
     None
 }
 
-fn map_rpc_result(id: Option<serde_json::Value>, res: Result<serde_json::Value, String>) -> JsonRpcResponse {
+fn map_rpc_result(
+    id: Option<serde_json::Value>,
+    res: Result<serde_json::Value, String>,
+) -> JsonRpcResponse {
     match res {
         Ok(val) => JsonRpcResponse::success(id, val),
         Err(err) => {
@@ -1287,7 +1471,7 @@ fn map_rpc_result(id: Option<serde_json::Value>, res: Result<serde_json::Value, 
                     id,
                     -32602,
                     msg.to_string(),
-                    Some(serde_json::json!({ "code": "E_INVALID_PARAMS" }))
+                    Some(serde_json::json!({ "code": "E_INVALID_PARAMS" })),
                 )
             } else if err.starts_with("E_NOT_FOUND: ") {
                 let msg = err.trim_start_matches("E_NOT_FOUND: ");
@@ -1295,7 +1479,7 @@ fn map_rpc_result(id: Option<serde_json::Value>, res: Result<serde_json::Value, 
                     id,
                     -32002,
                     msg.to_string(),
-                    Some(serde_json::json!({ "code": "E_NOT_FOUND" }))
+                    Some(serde_json::json!({ "code": "E_NOT_FOUND" })),
                 )
             } else if err.starts_with("E_SNAPSHOT_DATA_EXPIRED: ") {
                 let msg = err.trim_start_matches("E_SNAPSHOT_DATA_EXPIRED: ");
@@ -1306,12 +1490,21 @@ fn map_rpc_result(id: Option<serde_json::Value>, res: Result<serde_json::Value, 
                     Some(serde_json::json!({
                         "code": "E_SNAPSHOT_DATA_EXPIRED",
                         "retention": config_mgr::load_config().retention
-                    }))
+                    })),
                 )
             } else if err.starts_with("E_INSUFFICIENT_HISTORY:") {
-                let parts: Vec<&str> = err.trim_start_matches("E_INSUFFICIENT_HISTORY:").split(':').collect();
-                let days_available = parts.get(0).and_then(|p| p.parse::<f64>().ok()).unwrap_or(0.0);
-                let days_needed = parts.get(1).and_then(|p| p.parse::<f64>().ok()).unwrap_or(0.0);
+                let parts: Vec<&str> = err
+                    .trim_start_matches("E_INSUFFICIENT_HISTORY:")
+                    .split(':')
+                    .collect();
+                let days_available = parts
+                    .get(0)
+                    .and_then(|p| p.parse::<f64>().ok())
+                    .unwrap_or(0.0);
+                let days_needed = parts
+                    .get(1)
+                    .and_then(|p| p.parse::<f64>().ok())
+                    .unwrap_or(0.0);
                 let diff_days = (days_needed - days_available).max(0.0);
                 let avail_int = days_available as i64;
                 let needed_diff_int = diff_days.ceil() as i64;
@@ -1328,7 +1521,7 @@ fn map_rpc_result(id: Option<serde_json::Value>, res: Result<serde_json::Value, 
                         "code": "E_INSUFFICIENT_HISTORY",
                         "days_available": avail_int,
                         "days_needed": days_needed as i64
-                    }))
+                    })),
                 )
             } else {
                 JsonRpcResponse::error(id, -32603, err)
