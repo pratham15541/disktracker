@@ -92,7 +92,7 @@ jobs:
       - name: Install dependencies
         if: steps.check-npm.outputs.exists == 'false'
         working-directory: npm
-        run: npm install --ignore-scripts
+        run: npm install --ignore-scripts --force
 
       - name: Verify package contents
         if: steps.check-npm.outputs.exists == 'false'
