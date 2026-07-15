@@ -442,7 +442,8 @@ pub fn build_agent_graph() -> std::result::Result<CompiledGraph<AskState>, rust_
              2. To understand what an unknown folder/file is, call fetch_signature.\n\
              3. If you decide to execute a shell command (via cli_read_command or cli_write_command), you MUST explicitly state in your text response which shell you are executing the command in (e.g. 'Executing command in PowerShell:' or 'Executing command in Bash:') *before* making the tool call. Do not ask the user which shell they are using; you must use the shell specified in the Shell Mode dynamically provided to you.\n\
              4. Under Action Mode (interactive), you can suggest file deletions (cli_write_command) or snapshot operations (disktracker_snapshot_create, disktracker_snapshot_delete).\n\
-             5. Terminate and produce your final natural language answer as soon as you have the answer. DO NOT query in infinite loops.",
+             5. If you need to execute a mutating action (like creating or deleting a snapshot or deleting a file) to proceed or answer a question, do NOT ask the user for permission in text. Instead, directly invoke the corresponding mutating tool (e.g., `disktracker_snapshot_create`, `disktracker_snapshot_delete`, or `cli_write_command`). The environment will automatically present a `[y/N]` approval prompt to the user at the command line. If you are not in interactive mode, the tool call will be rejected with an error, at which point you should inform the user to run with the `--interactive` flag.\n\
+             6. Terminate and produce your final natural language answer as soon as you have the answer. DO NOT query in infinite loops.",
             shell,
             os
         );
