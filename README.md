@@ -33,27 +33,28 @@ DiskTracker uses a log-structured state machine model to separate fast write pat
 ```mermaid
 graph TB
     subgraph Windows Kernel
-        USN[NTFS USN Journal]
+        USN["NTFS USN Journal"]
     end
 
-    subgraph Background Daemon (disktracker daemon)
-        Watcher[USN Watcher Thread] -->|Append-Only| MutLog[(SQLite mutation_log)]
-        Scanner[Baseline Scanner] -->|Bulk Inserts Fact-Tree| Facts[(SQLite facts DB)]
+    subgraph "Background Daemon (disktracker daemon)"
+        Watcher["USN Watcher Thread"] -->|Append-Only| MutLog[("SQLite mutation_log")]
+        Scanner["Baseline Scanner"] -->|Bulk Inserts Fact-Tree| Facts[("SQLite facts DB")]
         
-        Drain[Drain Engine] -->|1. Polling Log| MutLog
+        Drain["Drain Engine"] -->|1. Polling Log| MutLog
         Drain -->|2. Resolve file size/meta| USN
         Drain -->|3. Merge UPSERT/DELETE| Facts
 
-        IPC[JSON-RPC Named Pipe Server] <-->|Named Pipe: \\.\pipe\disktracker| Client[Named Pipe Client Client]
+        IPC["JSON-RPC Named Pipe Server"]
     end
 
-    subgraph CLI Tool (disktracker CLI)
-        User[User Interface] <--> CLI[CLI Core Command Dispatch]
-        CLI <--> Client
+    subgraph "CLI Tool (disktracker CLI)"
+        User["User Interface"] --> CLI["CLI Core Command Dispatch"]
+        CLI --> Client["Named Pipe Client Client"]
+        Client -->|Named Pipe: \\.\pipe\disktracker| IPC
         
-        subgraph AI Subsystem (disktracker ask)
-            Agent[LangGraph Agent Graph] <-->|Tool Execution| CLI
-            Agent <-->|ChatModel Engine| LLM[OpenAI / OpenRouter API]
+        subgraph "AI Subsystem (disktracker ask)"
+            Agent["LangGraph Agent Graph"] -->|Tool Execution| CLI
+            Agent -->|ChatModel Engine| LLM["OpenAI / OpenRouter API"]
         end
     end
 ```
