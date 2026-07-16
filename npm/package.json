@@ -1,6 +1,6 @@
 {
   "name": "disktracker",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "DiskTracker — Windows file-system observation daemon and CLI",
   "main": "bin/index.js",
   "bin": {
