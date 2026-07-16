@@ -67,17 +67,19 @@ Performs ultra-fast substring searches on indexed filenames. By default, it runs
 
 ### `disktracker history [path]`
 Displays the mutation timeline of a folder or file.
+* **Display rules**: Created/Deleted/Renamed always shown (including 0B). Modified only when `|size_delta| >= 2`. Consecutive identical Created/Deleted/Renamed rows for the same file are aggregated; Modified rows stay unique.
 * **Usage**: `disktracker history [path] [options]`
 * **Options**:
   * `--since <duration/datetime>`: Filter events after a relative time (e.g., `2d`, `12h`) or UTC datetime.
   * `--until <duration/datetime>`: Filter events before a relative time or UTC datetime.
   * `--kind <Created/Modified/Deleted/Renamed>`: Filter by change action.
-  * `--collapse`: Combines consecutive entries of the same change action.
+  * `--collapse`: Also merges consecutive same-file same-kind rows (including Modified size deltas). Identical Created/Deleted/Renamed rows are already aggregated without this flag.
   * `--limit <limit>`: Max entries to return (default: `100`).
   * `--json`: Outputs raw JSON results.
 
 ### `disktracker top`
 Ranks files and directories by size, growth, or modifications.
+* **Display rules** (growth mode): 0B create/delete events can appear; tiny non-zero growth under 2B is hidden.
 * **Usage**: `disktracker top [options]`
 * **Options**:
   * `--path <path>`: Restricts ranking to a specific folder path.
@@ -99,7 +101,7 @@ Manage and inspect volume snapshots.
 * **Subcommands**:
   * `create [--label <name>] [path]`: Takes a snapshot index of the specified volume or folder with a custom label (auto-generated if omitted).
   * `list [--volume <vol>]`: Lists all saved snapshots in the system.
-  * `diff <snapshot_a> <snapshot_b> [--path <prefix>]`: Computes the net mutations and size differences between two snapshots.
+  * `diff <snapshot_a> <snapshot_b> [--path <prefix>]`: Computes the net mutations and size differences between two snapshots. Created/Deleted/Renamed always shown (including 0B); Modified only when `|size_delta| >= 2`.
 
 ---
 

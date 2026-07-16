@@ -42,15 +42,15 @@ The agent has access to 12 specialized tools to query or interact with your syst
 
 | Tool Name | Type | Description | Parameters |
 |---|---|---|---|
-| `disktracker_search` | Passive | Searches indexed files/folders using substring and file criteria. | `query` (string), `path` (string), `ext` (string), `min_size` (int), `max_size` (int), `modified_after` (string), `modified_before` (string), `limit` (int) |
-| `disktracker_history` | Passive | Queries the database mutation log for file creation, deletion, or renaming. | `path` (string), `since` (string), `until` (string), `kind` (string), `collapse` (bool), `limit` (int) |
-| `disktracker_top` | Passive | Ranks files and directories by size, size delta (growth), or modifications (churn). | `path` (string), `volume` (string), `folders` (bool), `files` (bool), `since` (string), `between_a` (string), `between_b` (string), `growth` (bool), `churn` (bool), `limit` (int) |
+| `disktracker_search` | Passive | Searches indexed files (exact substring by default). `advanced` enables multi-tier scoring; `fuzzy` enables typo-tolerant matching (also enables advanced). | `query` (string), `path` (string), `ext` (string), `min_size` (int), `max_size` (int), `modified_after` (string), `modified_before` (string), `advanced` (bool), `fuzzy` (bool), `limit` (int) |
+| `disktracker_history` | Passive | Queries mutation history. Created/Deleted/Renamed always shown (incl. 0B); Modified only if `|size_delta| >= 2`. Aggregates consecutive identical Created/Deleted/Renamed rows. | `path` (string), `since` (string), `until` (string), `kind` (string), `collapse` (bool), `limit` (int) |
+| `disktracker_top` | Passive | Ranks by size, growth, or churn. Growth: 0B create/delete can appear; tiny non-zero growth under 2B is hidden. | `path` (string), `volume` (string), `folders` (bool), `files` (bool), `since` (string), `between_a` (string), `between_b` (string), `growth` (bool), `churn` (bool), `limit` (int) |
 | `sqlite_read_query` | Passive | Runs arbitrary read-only SQL queries directly against the index database. | `query` (string) |
 | `cli_read_command` | Passive | Runs safe, read-only system shell commands (e.g. `dir`, `df`, `cat`) to verify OS state. | `command` (string) |
 | `disktracker_status` | Passive | Queries the status of the local DiskTracker daemon and active volumes. | (none) |
 | `disktracker_doctor` | Passive | Diagnoses database health and recent operations logs. | (none) |
 | `disktracker_snapshot_list`| Passive | Lists saved snapshots in the database. | `volume` (string), `limit` (int) |
-| `disktracker_snapshot_diff` | Passive | Diffs files between two snapshots. | `snapshot_a` (string), `snapshot_b` (string), `path` (string), `limit` (int) |
+| `disktracker_snapshot_diff` | Passive | Diffs files between two snapshots. Created/Deleted/Renamed always shown (incl. 0B); Modified only if `|size_delta| >= 2`. | `snapshot_a` (string), `snapshot_b` (string), `path` (string), `limit` (int) |
 | `fetch_signature` | Passive | Resolves heuristics and signatures for directories or executables (e.g. `System32`, `Temp`).| `target` (string) |
 | `cli_write_command` | **Active** | Executes a file-mutating OS command (e.g. `rm`, `del`, `erase`). *Triggers HITL prompt.* | `command` (string) |
 | `snapshot_manage` | **Active** | Deletes or compresses a saved snapshot. *Triggers HITL prompt.* | `action` (string), `label` (string) |

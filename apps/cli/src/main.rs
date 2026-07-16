@@ -52,6 +52,9 @@ enum Commands {
         subcommand: ConfigCommands,
     },
     /// Search files/directories indexed in the database
+    ///
+    /// Default: exact case-insensitive substring match.
+    /// Use --advanced/--advance for multi-tier scoring; --fuzzy for typo tolerance.
     Search {
         /// The text search query (matches filenames)
         #[arg(index = 1, default_value = "*")]
@@ -103,6 +106,10 @@ enum Commands {
         fuzzy: bool,
     },
     /// View the mutation history of a specific file or directory
+    ///
+    /// Created/Deleted/Renamed always shown (including 0B). Modified only when
+    /// |size_delta| >= 2. Consecutive identical Created/Deleted/Renamed rows
+    /// for the same file are aggregated; Modified rows stay unique.
     History {
         /// The path of the file or directory to query history for (defaults to current directory)
         #[arg(index = 1)]
@@ -116,7 +123,7 @@ enum Commands {
         /// Filter by mutation kind (created, modified, deleted, renamed)
         #[arg(long)]
         kind: Option<String>,
-        /// Collapse consecutive same-kind entries
+        /// Collapse consecutive same-file same-kind entries (Modified included)
         #[arg(long)]
         collapse: bool,
         /// Max number of history entries to return
@@ -133,6 +140,9 @@ enum Commands {
         verbose: bool,
     },
     /// Rank files/folders by current size or growth/churn
+    ///
+    /// Growth mode: 0B create/delete events can appear; tiny non-zero growth
+    /// under 2B is hidden (same floor as Modified elsewhere).
     Top {
         /// Restrict to a specific folder path (e.g. C:\Windows)
         #[arg(long)]
@@ -264,6 +274,9 @@ enum SnapshotCommands {
         cursor: Option<String>,
     },
     /// Diff two snapshots to see net file mutations
+    ///
+    /// Created/Deleted/Renamed always shown (including 0B). Modified only when
+    /// |size_delta| >= 2.
     Diff {
         /// First snapshot label or ID
         snapshot_a: String,

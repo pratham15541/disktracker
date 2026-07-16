@@ -320,7 +320,8 @@ pub fn get_history(
         query.push_str(" ORDER BY sequence ASC");
     }
 
-    let fetch_limit = if collapse { limit * 2 } else { limit };
+    // Fetch extra rows so consecutive aggregation still fills the requested limit
+    let fetch_limit = if collapse { limit * 4 } else { limit * 2 };
     let limit_val = fetch_limit + 1;
     params.push(&limit_val as &dyn rusqlite::ToSql);
     query.push_str(&format!(" LIMIT ?{}", params.len()));
@@ -355,14 +356,26 @@ pub fn get_history(
 
     let mut entries = db_entries;
 
-    // Apply server-side collapse logic
-    if collapse {
+    // Aggregate consecutive identical display rows (Created/Deleted/Renamed of the
+    // same file). Modified stays unique. With --collapse, also merge consecutive
+    // same-kind same-file rows (including Modified size_deltas).
+    {
         let mut collapsed = Vec::with_capacity(entries.len());
         let mut iter = entries.into_iter();
         if let Some(first) = iter.next() {
             let mut current = first;
             for next in iter {
-                if current.kind == next.kind {
+                let same_display = crate::mutation_filter::can_aggregate_history_entries(
+                    &current.kind,
+                    current.file_id,
+                    &current.name,
+                    &next.kind,
+                    next.file_id,
+                    &next.name,
+                );
+                let collapse_same_file =
+                    collapse && current.kind == next.kind && current.file_id == next.file_id;
+                if same_display || collapse_same_file {
                     current.size_delta += next.size_delta;
                     current.sequence = next.sequence;
                     current.at = next.at;
@@ -379,8 +392,8 @@ pub fn get_history(
         entries = collapsed;
     }
 
-    // Changes less than 10B should not be shown (except renames)
-    entries.retain(|e| e.kind == "Renamed" || e.size_delta.abs() >= 10);
+    // Created/Deleted/Renamed (incl. 0B) always shown; Modified only if |delta| >= 2
+    entries.retain(|e| crate::mutation_filter::is_displayable_mutation(&e.kind, e.size_delta));
 
     let collapsed_has_more = entries.len() > limit || has_more;
     if entries.len() > limit {

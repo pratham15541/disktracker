@@ -693,7 +693,9 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                         if size_delta == 0 && churn_val == 0 {
                             continue;
                         }
-                        if !churn && size_delta.abs() < 10 {
+                        // Allow 0B create/delete (size_delta == 0 with churn);
+                        // hide tiny non-zero growth (< 2B), same as Modified floor
+                        if !churn && size_delta != 0 && size_delta.abs() < 2 {
                             continue;
                         }
 
@@ -730,7 +732,9 @@ pub fn handle_get_top(params: Value) -> Result<Value, String> {
                         if size_delta == 0 && churn_val == 0 {
                             continue;
                         }
-                        if !churn && size_delta.abs() < 10 {
+                        // Allow 0B create/delete (size_delta == 0 with churn);
+                        // hide tiny non-zero growth (< 2B), same as Modified floor
+                        if !churn && size_delta != 0 && size_delta.abs() < 2 {
                             continue;
                         }
 

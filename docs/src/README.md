@@ -107,8 +107,8 @@ Below is the quick reference card for DiskTracker commands.
 | `disktracker init` | Starts/Registers the background daemon as a Windows Service and crawls baseline facts. |
 | `disktracker status` | Queries the running daemon's status (PID, monitored volumes, and crawler phase). |
 | `disktracker doctor` | Runs diagnostic health checks (database integrity, journaling state, permissions). |
-| `disktracker search <query>` | Performs a substring search on the database with optional file size/time filtering. |
-| `disktracker history [path]` | Displays file/directory mutation logs (Created, Modified, Deleted, Renamed). |
+| `disktracker search <query>` | Exact substring search by default; `--advanced`/`--advance` for multi-tier scoring, `--fuzzy` for typo-tolerant matching. |
+| `disktracker history [path]` | Displays mutation logs. Created/Deleted/Renamed always shown (incl. 0B); Modified only if `|size_delta| >= 2`. |
 | `disktracker top` | Lists the largest files, folders, or directories ranking by growth or modifications (churn). |
 | `disktracker snapshot create` | Takes a labeled snapshot of a volume's index state. |
 | `disktracker snapshot diff <A> <B>` | Diffs two snapshots to show net files created, updated, or removed between time frames. |

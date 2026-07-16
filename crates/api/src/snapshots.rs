@@ -602,8 +602,8 @@ pub fn calculate_diff(
     // Resolve paths & filter by prefix
     let mut results = Vec::new();
     for (_, mut file) in diff_map {
-        // Changes less than 10B should not be shown (except renames)
-        if file.kind != "Renamed" && file.size_delta.abs() < 10 {
+        // Created/Deleted/Renamed (incl. 0B) always shown; Modified only if |delta| >= 2
+        if !crate::mutation_filter::is_displayable_mutation(&file.kind, file.size_delta) {
             continue;
         }
         let full_path =
