@@ -4,7 +4,7 @@ Created by **[Pratham Parikh](https://github.com/pratham15541)**
 
 [![GitHub stars](https://img.shields.io/github/stars/pratham15541/disktracker.svg?style=social)](https://github.com/pratham15541/disktracker)
 
-[![Platform: Windows x64](https://img.shields.io/badge/platform-windows--x64-blue.svg)](https://github.com/pratham15541/disktracker)
+[![Platform: Windows x64 / ARM64](https://img.shields.io/badge/platform-windows--x64%20%7C%20arm64-blue.svg)](https://github.com/pratham15541/disktracker)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![NPM version](https://img.shields.io/npm/v/disktracker.svg)](https://www.npmjs.com/package/disktracker)
 [![Chocolatey](https://img.shields.io/badge/chocolatey-v2.0.0-orange.svg)](https://community.chocolatey.org/packages/disktracker)
@@ -68,14 +68,11 @@ graph TB
 
 ## 📦 Installation
 
-DiskTracker is built for Windows x64. You can install it through several package managers or a standalone script.
+DiskTracker is built for Windows (x64 and ARM64). You can install it through several package managers or a standalone script.
 
 ### Method 1: Standalone Powershell (Recommended)
 Open Command Prompt or PowerShell **as Administrator** and run:
-```cmd
-:: Via Command Prompt (Admin)
-curl -L -o install.bat https://raw.githubusercontent.com/pratham15541/disktracker/main/install.bat && install.bat
-```
+
 ```powershell
 # Via PowerShell (Admin)
 irm https://raw.githubusercontent.com/pratham15541/disktracker/main/install.ps1 | iex

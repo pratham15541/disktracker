@@ -9,10 +9,20 @@ if (process.platform !== 'win32') {
   process.exit(1);
 }
 
+function getWindowsArchiveSuffix() {
+  const wow64Arch = process.env.PROCESSOR_ARCHITEW6432 || '';
+  const processArch = process.env.PROCESSOR_ARCHITECTURE || '';
+  if (/ARM64/i.test(wow64Arch) || /ARM64/i.test(processArch) || process.arch === 'arm64') {
+    return 'windows-arm64';
+  }
+  return 'windows-x64';
+}
+
 const pkg = require('./package.json');
 const version = pkg.version;
 const tag = `v${version}`;
-const zipName = `disktracker-${tag}-windows-x64.zip`;
+const archiveSuffix = getWindowsArchiveSuffix();
+const zipName = `disktracker-${tag}-${archiveSuffix}.zip`;
 const url = `https://github.com/pratham15541/disktracker/releases/download/${tag}/${zipName}`;
 
 const binDir = path.join(__dirname, 'bin');
@@ -22,7 +32,7 @@ if (!fs.existsSync(binDir)) {
 
 const zipPath = path.join(binDir, zipName);
 
-console.log(`Downloading DiskTracker ${tag} from GitHub Releases...`);
+console.log(`Downloading DiskTracker ${tag} (${archiveSuffix}) from GitHub Releases...`);
 console.log(`URL: ${url}`);
 
 function download(downloadUrl, destPath) {

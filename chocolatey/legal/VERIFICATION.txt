@@ -1,9 +1,14 @@
 VERIFICATION
 Verification instructions for the DiskTracker Chocolatey package.
 
-The package contains a binary zip retrieved from the official GitHub Release page:
-URL: https://github.com/pratham15541/disktracker/releases/download/__RELEASE_TAG__/disktracker-__RELEASE_TAG__-windows-x64.zip
-SHA256 Checksum: __CHECKSUM_X64__
+The package downloads architecture-specific binaries from the official GitHub Release page:
 
-To verify, download the zip file from the URL above and calculate the SHA256 checksum:
+x64 URL: https://github.com/pratham15541/disktracker/releases/download/__RELEASE_TAG__/disktracker-__RELEASE_TAG__-windows-x64.zip
+x64 SHA256 Checksum: __CHECKSUM_X64__
+
+ARM64 URL: https://github.com/pratham15541/disktracker/releases/download/__RELEASE_TAG__/disktracker-__RELEASE_TAG__-windows-arm64.zip
+ARM64 SHA256 Checksum: __CHECKSUM_ARM64__
+
+To verify, download the zip file for your architecture from the URL above and calculate the SHA256 checksum:
 Get-FileHash -Path disktracker-__RELEASE_TAG__-windows-x64.zip -Algorithm SHA256
+Get-FileHash -Path disktracker-__RELEASE_TAG__-windows-arm64.zip -Algorithm SHA256

@@ -7,6 +7,22 @@ if (-not $isAdmin) {
     Exit 1
 }
 
+function Get-DiskTrackerArchiveSuffix {
+    try {
+        if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) {
+            return 'windows-arm64'
+        }
+    } catch {
+        # Fall through to environment-variable detection.
+    }
+
+    if (($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') -or ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        return 'windows-arm64'
+    }
+
+    return 'windows-x64'
+}
+
 Write-Output "Checking for the latest DiskTracker version from GitHub..."
 $repoUrl = "https://api.github.com/repos/pratham15541/disktracker/releases/latest"
 
@@ -19,8 +35,9 @@ try {
     Exit 1
 }
 
-Write-Output "Latest version found: $tag"
-$zipUrl = "https://github.com/pratham15541/disktracker/releases/download/$tag/disktracker-$tag-windows-x64.zip"
+$archiveSuffix = Get-DiskTrackerArchiveSuffix
+Write-Output "Latest version found: $tag ($archiveSuffix)"
+$zipUrl = "https://github.com/pratham15541/disktracker/releases/download/$tag/disktracker-$tag-$archiveSuffix.zip"
 $tempZip = Join-Path $env:TEMP "disktracker-$tag.zip"
 
 Write-Output "Downloading from $zipUrl..."

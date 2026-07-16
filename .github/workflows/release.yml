@@ -11,35 +11,47 @@ permissions:
 
 jobs:
   build:
-    name: Build (Windows x64)
+    name: Build (${{ matrix.archive_suffix }})
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            archive_suffix: windows-x64
+            artifact_name: disktracker-x86_64-pc-windows-msvc
+          - target: aarch64-pc-windows-msvc
+            archive_suffix: windows-arm64
+            artifact_name: disktracker-aarch64-pc-windows-msvc
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Build (Windows - static CRT)
         env:
           RUSTFLAGS: "-C target-feature=+crt-static"
-        run: cargo build --release -p disktracker --bin disktracker --target x86_64-pc-windows-msvc
+        run: cargo build --release -p disktracker --bin disktracker --target ${{ matrix.target }}
 
       - name: Package (Windows)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist | Out-Null
-          $archive = "dist/disktracker-${{ github.ref_name }}-windows-x64.zip"
-          Compress-Archive -Path "target/x86_64-pc-windows-msvc/release/disktracker.exe" -DestinationPath $archive
+          $archive = "dist/disktracker-${{ github.ref_name }}-${{ matrix.archive_suffix }}.zip"
+          Compress-Archive -Path "target/${{ matrix.target }}/release/disktracker.exe" -DestinationPath $archive
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: disktracker-x86_64-pc-windows-msvc
+          name: ${{ matrix.artifact_name }}
           path: dist/*
 
   release:
@@ -130,12 +142,17 @@ jobs:
           $tag = '${{ github.ref_name }}'
           $version = $tag -replace '^v', ''
           $x64Archive = Join-Path $PWD "artifacts\disktracker-$tag-windows-x64.zip"
+          $arm64Archive = Join-Path $PWD "artifacts\disktracker-$tag-windows-arm64.zip"
 
           if (-not (Test-Path $x64Archive)) {
             throw "Missing Chocolatey x64 archive: $x64Archive"
           }
+          if (-not (Test-Path $arm64Archive)) {
+            throw "Missing Chocolatey arm64 archive: $arm64Archive"
+          }
 
           $checksumX64 = (Get-FileHash $x64Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumArm64 = (Get-FileHash $arm64Archive -Algorithm SHA256).Hash.ToLowerInvariant()
 
           $nuspecPath = 'chocolatey\disktracker.nuspec'
           $nuspec = Get-Content -Raw $nuspecPath
@@ -146,12 +163,14 @@ jobs:
           $install = Get-Content -Raw $installPath
           $install = $install.Replace('__RELEASE_TAG__', $tag)
           $install = $install.Replace('__CHECKSUM_X64__', $checksumX64)
+          $install = $install.Replace('__CHECKSUM_ARM64__', $checksumArm64)
           Set-Content -Path $installPath -Value $install -NoNewline
 
           $verificationPath = 'chocolatey\legal\VERIFICATION.txt'
           $verification = Get-Content -Raw $verificationPath
           $verification = $verification.Replace('__RELEASE_TAG__', $tag)
           $verification = $verification.Replace('__CHECKSUM_X64__', $checksumX64)
+          $verification = $verification.Replace('__CHECKSUM_ARM64__', $checksumArm64)
           Set-Content -Path $verificationPath -Value $verification -NoNewline
 
       - name: Pack Chocolatey package

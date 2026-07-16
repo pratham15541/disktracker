@@ -42,3 +42,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: cargo test (workspace)
         run: cargo test --workspace --all-targets --all-features
+
+  build-windows-arm64:
+    name: Build (Windows ARM64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-pc-windows-msvc
+      - name: cargo build (aarch64-pc-windows-msvc)
+        env:
+          RUSTFLAGS: "-C target-feature=+crt-static"
+        run: cargo build --release -p disktracker --bin disktracker --target aarch64-pc-windows-msvc

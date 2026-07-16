@@ -4,7 +4,7 @@ Created by **[Pratham Parikh](https://github.com/pratham15541)**
 
 [![GitHub stars](https://img.shields.io/github/stars/pratham15541/disktracker.svg?style=social)](https://github.com/pratham15541/disktracker)
 
-[![Platform: Windows x64](https://img.shields.io/badge/platform-windows--x64-blue.svg)](https://github.com/pratham15541/disktracker)
+[![Platform: Windows x64 / ARM64](https://img.shields.io/badge/platform-windows--x64%20%7C%20arm64-blue.svg)](https://github.com/pratham15541/disktracker)
 [![NPM version](https://img.shields.io/npm/v/disktracker.svg)](https://www.npmjs.com/package/disktracker)
 
 **DiskTracker** is an NPM wrapper that installs the high-performance, real-time Windows file-system observation daemon and AI-driven command-line tool.
@@ -20,8 +20,8 @@ npm install -g disktracker
 ```
 
 > [!NOTE]
-> **Compatibility**: DiskTracker is strictly supported on **Windows x64** platforms. Installation on Linux or macOS is blocked to prevent incompatibility.
-> The NPM package runs a lightweight `postinstall` script to download the version-matched precompiled native Windows binary from GitHub Releases and sets up a global symlink.
+> **Compatibility**: DiskTracker is supported on **Windows x64 and Windows ARM64**. Installation on Linux or macOS is blocked to prevent incompatibility.
+> The NPM package runs a lightweight `postinstall` script to download the architecture-matched precompiled native Windows binary from GitHub Releases and sets up a global symlink.
 
 ---
 

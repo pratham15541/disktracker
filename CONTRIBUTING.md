@@ -39,7 +39,7 @@ DiskTracker tracks every file-system change on a Windows volume in real time usi
 
 This design avoids database contention and allows zero-overhead event capture even under heavy I/O.
 
-The project targets **Windows (x86_64)** as its primary platform. Linux/WSL builds compile but use mock implementations for platform-specific code (useful for CI and development).
+The project targets **Windows (x86_64 and ARM64)** as its primary platform. Linux/WSL builds compile but use mock implementations for platform-specific code (useful for CI and development).
 
 ---
 
@@ -51,7 +51,8 @@ The project targets **Windows (x86_64)** as its primary platform. Linux/WSL buil
 |------|---------|-------|
 | [Rust](https://rustup.rs/) | stable (latest) | Install via `rustup` |
 | `x86_64-pc-windows-gnu` target | — | For cross-compiling on Linux |
-| `x86_64-pc-windows-msvc` target | — | Required for release builds |
+| `x86_64-pc-windows-msvc` target | — | Required for x64 release builds |
+| `aarch64-pc-windows-msvc` target | — | Required for ARM64 release builds |
 | Git | any | — |
 
 On Linux/WSL (development only):
@@ -65,6 +66,7 @@ On Windows (native / CI):
 
 ```sh
 rustup target add x86_64-pc-windows-msvc
+rustup target add aarch64-pc-windows-msvc
 ```
 
 ### Cloning & Building
@@ -79,8 +81,9 @@ cargo build
 # Cross-compile for Windows from Linux
 cargo build --target x86_64-pc-windows-gnu
 
-# Release build on Windows (used in CI)
-cargo build --release -p disktracker-cli --bin disktracker --target x86_64-pc-windows-msvc
+# Release builds on Windows (used in CI)
+cargo build --release -p disktracker --bin disktracker --target x86_64-pc-windows-msvc
+cargo build --release -p disktracker --bin disktracker --target aarch64-pc-windows-msvc
 ```
 
 > **Note:** Always verify the build compiles before starting development. If `PROGRESS.md` claims a feature is complete, cross-check it against the actual crate source — never trust docs blindly.

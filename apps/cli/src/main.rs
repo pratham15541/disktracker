@@ -3795,8 +3795,10 @@ async fn run_update() -> Result<(), String> {
     let mut download_url = None;
     let mut asset_name = String::new();
 
-    // Look for Windows asset if on windows
-    #[cfg(windows)]
+    // Look for the architecture-matching Windows release asset
+    #[cfg(all(windows, target_arch = "aarch64"))]
+    let os_suffix = "windows-arm64.zip";
+    #[cfg(all(windows, not(target_arch = "aarch64")))]
     let os_suffix = "windows-x64.zip";
     #[cfg(not(windows))]
     let os_suffix = ".zip"; // Fallback for Unix
