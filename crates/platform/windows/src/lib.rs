@@ -470,16 +470,16 @@ pub fn ensure_usn_journal_active(volume: &str) -> std::io::Result<()> {
                 Ok(())
             } else {
                 let err_msg = String::from_utf8_lossy(&out.stderr).to_string();
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("fsutil failed to create USN journal: {}", err_msg),
-                ))
+                Err(std::io::Error::other(format!(
+                    "fsutil failed to create USN journal: {}",
+                    err_msg
+                )))
             }
         }
-        Err(e) => Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to execute fsutil fallback: {}", e),
-        )),
+        Err(e) => Err(std::io::Error::other(format!(
+            "Failed to execute fsutil fallback: {}",
+            e
+        ))),
     }
 }
 
@@ -574,12 +574,7 @@ pub async fn watch_usn_journal(volume: &str, start_usn: u64) -> std::io::Result<
 
     let mut conn = match storage::get_db_connection() {
         Ok(c) => c,
-        Err(e) => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                e.to_string(),
-            ))
-        }
+        Err(e) => return Err(std::io::Error::other(e.to_string())),
     };
 
     let tracker = core_types::get_volume_tracker(volume);
@@ -1308,7 +1303,7 @@ pub fn relaunch_as_admin(extra_args: &[&str]) -> std::io::Result<()> {
                 params.as_ptr()
             },
             std::ptr::null(), // lpDirectory (inherit)
-            SW_SHOWNORMAL as i32,
+            SW_SHOWNORMAL,
         )
     };
 
@@ -1375,9 +1370,10 @@ pub fn kill_process_by_pid(pid: u32) -> std::io::Result<()> {
 // =========================================================================
 
 #[cfg(windows)]
-static SERVER_RUNNER: std::sync::Mutex<
-    Option<Box<dyn FnOnce(tokio::sync::oneshot::Receiver<()>) + Send>>,
-> = std::sync::Mutex::new(None);
+type ServerRunnerFn = Box<dyn FnOnce(tokio::sync::oneshot::Receiver<()>) + Send>;
+
+#[cfg(windows)]
+static SERVER_RUNNER: std::sync::Mutex<Option<ServerRunnerFn>> = std::sync::Mutex::new(None);
 
 #[cfg(windows)]
 static SHUTDOWN_TX: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>> =
@@ -1541,10 +1537,10 @@ pub fn register_service() -> std::io::Result<()> {
     } else {
         let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
         let out_msg = String::from_utf8_lossy(&output.stdout).to_string();
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("sc create failed: {}\n{}", err_msg, out_msg),
-        ))
+        Err(std::io::Error::other(format!(
+            "sc create failed: {}\n{}",
+            err_msg, out_msg
+        )))
     }
 }
 
@@ -1564,10 +1560,10 @@ pub fn unregister_service() -> std::io::Result<()> {
     } else {
         let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
         let out_msg = String::from_utf8_lossy(&output.stdout).to_string();
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("sc delete failed: {}\n{}", err_msg, out_msg),
-        ))
+        Err(std::io::Error::other(format!(
+            "sc delete failed: {}\n{}",
+            err_msg, out_msg
+        )))
     }
 }
 
@@ -1587,10 +1583,10 @@ pub fn start_service() -> std::io::Result<()> {
     } else {
         let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
         let out_msg = String::from_utf8_lossy(&output.stdout).to_string();
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("sc start failed: {}\n{}", err_msg, out_msg),
-        ))
+        Err(std::io::Error::other(format!(
+            "sc start failed: {}\n{}",
+            err_msg, out_msg
+        )))
     }
 }
 
@@ -1610,10 +1606,10 @@ pub fn stop_service() -> std::io::Result<()> {
     } else {
         let err_msg = String::from_utf8_lossy(&output.stderr).to_string();
         let out_msg = String::from_utf8_lossy(&output.stdout).to_string();
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("sc stop failed: {}\n{}", err_msg, out_msg),
-        ))
+        Err(std::io::Error::other(format!(
+            "sc stop failed: {}\n{}",
+            err_msg, out_msg
+        )))
     }
 }
 
