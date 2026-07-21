@@ -67,6 +67,10 @@ graph TB
 
 ---
 
+## Demo Video - Click Below Image
+[![DiskTracker Demo Video](https://github.com/user-attachments/assets/e44b8f4a-da08-4b99-bb8e-d2876a1a9f90)](https://youtu.be/yq48PfV5Nwk)
+
+
 ## 📦 Installation
 
 DiskTracker is built for Windows (x64 and ARM64). You can install it through several package managers or a standalone script.
