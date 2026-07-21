@@ -159,9 +159,33 @@ We plan to expand DiskTracker along these key vectors:
    - Write comprehensive E2E tests for the named pipe JSON-RPC interface.
    - Mock NTFS USN Journal logs to test edge cases in our state reducer / drain engine.
    - Run clippy, formatting, and unit tests under GitHub Actions (`ci.yml`) on every pull request.
-2. **Cross-Platform Support**:
+2. **Adding observabilty dashboard + Opentelementary**
+                 DiskTracker
+
+        +-------------------------+
+        |         CLI             |
+        +-----------+-------------+
+                    |
+                    v
+        +-------------------------+
+        |       Daemon            |
+        |-------------------------|
+        | USN Watcher             |
+        | Baseline Scanner        |
+        | Drain Engine            |
+        | SQLite                  |
+        | Named Pipe RPC          |
+        | LangGraph Agent         |
+        +-----------+-------------+
+                    |
+          OpenTelemetry SDK
+                    |
+             OTLP Exporter
+                    |
+        SigNoz/New Relic/Grafana/Others
+3. **Cross-Platform Support**:
    - Extend the core platform traits with `platform-macos` utilizing Apple's **FSEvents** API.
    - Add `platform-linux` utilizing the Linux **inotify** system.
-3. **GUI Desktop Client**:
+4. **GUI Desktop Client**:
    - Develop a modern, lightweight desktop interface built with Tauri and React.
    - Provide interactive sunburst charts, real-time file modification feeds, and visual timeline analysis.

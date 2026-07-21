@@ -7,7 +7,8 @@ Created by **[Pratham Parikh](https://github.com/pratham15541)**
 [![Platform: Windows x64 / ARM64](https://img.shields.io/badge/platform-windows--x64%20%7C%20arm64-blue.svg)](https://github.com/pratham15541/disktracker)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![NPM version](https://img.shields.io/npm/v/disktracker.svg)](https://www.npmjs.com/package/disktracker)
-[![Chocolatey](https://img.shields.io/badge/chocolatey-v2.0.0-orange.svg)](https://community.chocolatey.org/packages/disktracker)
+[![Chocolatey](https://img.shields.io/chocolatey/v/disktracker.svg)](https://community.chocolatey.org/packages/disktracker)
+[![Winget](https://img.shields.io/badge/winget-pratham15541.disktracker-blue)](https://winstall.app/apps/pratham15541.disktracker)
 
 **DiskTracker** is a high-performance, real-time Windows file-system observation daemon and an AI-driven CLI interface. 
 
